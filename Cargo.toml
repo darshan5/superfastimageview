@@ -16,9 +16,12 @@ glutin = "0.32"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "tiff", "webp", "tga", "qoi", "pnm", "hdr", "exr", "dds", "ff", "rayon"] }
 natord = "1.0.9"
 raw-window-handle = "0.6"
+rawler = "0.8.0"
 rayon = "1.12.0"
 rfd = "0.17.2"
 trash = "5.2.9"
+turbojpeg = { version = "1.5", default-features = false, features = ["cmake"] }
+webp = "0.3.1"
 winit = "0.30"
 
 [profile.release]
@@ -34,6 +37,7 @@ opt-level = 3
 
 [target."cfg(windows)".dependencies]
 mimalloc = "0.1.52"
+windows = { version = "0.62", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_Foundation"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
 
 [target."cfg(windows)".build-dependencies]

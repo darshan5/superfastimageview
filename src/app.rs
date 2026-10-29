@@ -15,6 +15,7 @@ use image::RgbaImage;
 use crate::canvas::{Canvas, checker_texture};
 use crate::convert::{self, BatchProgress, BatchResize, BatchSettings, OutFormat, PngLevel, SaveOptions};
 use crate::edit::{self, ResizeFilter};
+use crate::jpegtran;
 use crate::loader::{self, Decoded, Loader};
 use crate::paint::{self, Dirty};
 
@@ -36,27 +37,39 @@ pub struct Document {
     pub image: Arc<RgbaImage>,
     pub has_alpha: bool,
     pub file_size: u64,
-    pub format: Option<image::ImageFormat>,
+    pub format: String,
     pub decode_ms: f64,
     pub dirty: bool,
     pub version: u64,
     undo: Vec<Arc<RgbaImage>>,
     redo: Vec<Arc<RgbaImage>>,
+    /// The decode this came from; animation frames arrive on it later.
+    source: Option<Arc<Decoded>>,
+    anim: Option<Anim>,
+}
+
+/// Playback state of an animated GIF / WebP / APNG.
+struct Anim {
+    frame: usize,
+    next_at: Instant,
+    playing: bool,
 }
 
 impl Document {
-    fn from_decoded(d: &Decoded) -> Self {
+    fn from_decoded(d: &Arc<Decoded>) -> Self {
         Self {
             path: Some(d.path.clone()),
-            image: d.image.clone(),
+            image: d.refined.get().unwrap_or(&d.image).clone(),
             has_alpha: d.has_alpha,
             file_size: d.file_size,
-            format: d.format,
+            format: d.format.clone(),
             decode_ms: d.decode_ms,
             dirty: false,
             version: next_version(),
             undo: Vec::new(),
             redo: Vec::new(),
+            source: Some(d.clone()),
+            anim: None,
         }
     }
 
@@ -66,12 +79,14 @@ impl Document {
             image: Arc::new(img),
             has_alpha: true,
             file_size: 0,
-            format: None,
+            format: String::new(),
             decode_ms: 0.0,
             dirty: true,
             version: next_version(),
             undo: Vec::new(),
             redo: Vec::new(),
+            source: None,
+            anim: None,
         }
     }
 
@@ -86,6 +101,9 @@ impl Document {
     /// Saves the current pixels for undo. Cheap: the pixels are shared until
     /// the next edit copies them (`Arc::make_mut`).
     fn checkpoint(&mut self) {
+        // Editing works on the current frame; the animation stops for good.
+        self.anim = None;
+        self.source = None;
         self.undo.push(self.image.clone());
         self.redo.clear();
         let mut total: usize = self.undo.iter().map(|i| i.as_raw().len()).sum();
@@ -498,7 +516,7 @@ impl App {
 
     fn open_dialog(&mut self) {
         let mut dlg = rfd::FileDialog::new()
-            .add_filter("Images", loader::EXTENSIONS)
+            .add_filter("Images", loader::extensions())
             .add_filter("All files", &["*"]);
         if let Some(dir) = &self.folder_dir {
             dlg = dlg.set_directory(dir);
@@ -772,6 +790,10 @@ impl App {
             self.save_as();
         } else if k(cmd_shift, Key::Z) {
             self.redo();
+        } else if k(cmd_shift, Key::R) {
+            self.lossless(jpegtran::Op::RotateCw);
+        } else if k(cmd_shift, Key::L) {
+            self.lossless(jpegtran::Op::RotateCcw);
         } else if k(cmd_shift, Key::I) {
             self.modify(edit::invert);
         } else if k(cmd, Key::O) {
@@ -857,6 +879,9 @@ impl App {
                 self.tool = Tool::Hand;
             }
         }
+        if pressed(Key::P) {
+            self.toggle_playback();
+        }
         if pressed(Key::F1) {
             self.show_help = !self.show_help;
         }
@@ -934,6 +959,11 @@ impl App {
                         ui.selectable_value(&mut self.save_opts.png_level, PngLevel::Default, "Default");
                         ui.selectable_value(&mut self.save_opts.png_level, PngLevel::Best, "Best");
                     });
+                    ui.checkbox(&mut self.save_opts.webp_lossless, "WebP lossless");
+                    ui.add_enabled(
+                        !self.save_opts.webp_lossless,
+                        egui::Slider::new(&mut self.save_opts.webp_quality, 1..=100).text("WebP quality"),
+                    );
                 });
                 ui.separator();
                 if ui.add(egui::Button::new("Batch conversion…").shortcut_text("B")).clicked() {
@@ -983,6 +1013,23 @@ impl App {
                     if ui.button("Rotate 180°").clicked() {
                         self.modify(edit::rotate_180);
                     }
+                    let can_lossless =
+                        self.doc.as_ref().is_some_and(|d| !d.dirty && d.path.as_deref().is_some_and(jpegtran::is_jpeg));
+                    ui.add_enabled_ui(can_lossless, |ui| {
+                        ui.menu_button("Lossless JPEG transform", |ui| {
+                            for op in jpegtran::Op::ALL {
+                                let shortcut = match op {
+                                    jpegtran::Op::RotateCw => sc("Ctrl+Shift+R"),
+                                    jpegtran::Op::RotateCcw => sc("Ctrl+Shift+L"),
+                                    _ => String::new(),
+                                };
+                                if ui.add(egui::Button::new(op.label()).shortcut_text(shortcut)).clicked() {
+                                    self.lossless(op);
+                                }
+                            }
+                            ui.weak("Rewrites the file without recompressing.");
+                        });
+                    });
                     if ui.add(egui::Button::new("Flip horizontal").shortcut_text("H")).clicked() {
                         self.modify(edit::flip_h);
                     }
@@ -1393,6 +1440,87 @@ impl App {
         }
     }
 
+    /// Advances animated images and schedules the next frame.
+    fn animate(&mut self, ctx: &egui::Context) {
+        let Some(doc) = &mut self.doc else { return };
+        // Full RAW development finished: swap it in (same view, no edits yet).
+        if let Some(full) = doc.source.as_ref().and_then(|s| s.refined.get())
+            && !Arc::ptr_eq(full, &doc.image)
+        {
+            // Keep the on-screen size when the resolution jumps.
+            let ratio = doc.image.width() as f32 / full.width() as f32;
+            doc.image = full.clone();
+            doc.version = next_version();
+            if let Some(s) = &doc.source {
+                doc.format = s.format.replace("embedded preview", "developed");
+            }
+            if !self.view.fit {
+                self.view.zoom *= ratio;
+            }
+            return;
+        }
+        let Some(frames) = doc.source.as_ref().and_then(|s| s.frames.get()) else { return };
+        let now = Instant::now();
+        let anim = doc.anim.get_or_insert_with(|| Anim { frame: 0, next_at: now + frames[0].delay, playing: true });
+        if !anim.playing {
+            return;
+        }
+        if now >= anim.next_at {
+            anim.frame = (anim.frame + 1) % frames.len();
+            let f = &frames[anim.frame];
+            // Late by more than a frame (e.g. window was hidden): resync.
+            anim.next_at = if now > anim.next_at + f.delay { now + f.delay } else { anim.next_at + f.delay };
+            doc.image = f.image.clone();
+            doc.version = next_version();
+            // Same size every frame: update the existing textures in place.
+            let (w, h) = doc.image.dimensions();
+            self.canvas.update_region(&doc.image, 0, 0, w, h);
+            self.uploaded_version = doc.version;
+        }
+        ctx.request_repaint_after(anim.next_at.saturating_duration_since(now));
+    }
+
+    fn toggle_playback(&mut self) {
+        if let Some(a) = self.doc.as_mut().and_then(|d| d.anim.as_mut()) {
+            a.playing = !a.playing;
+            a.next_at = Instant::now();
+        }
+    }
+
+    /// Lossless JPEG rotate/flip on the file itself (no recompression).
+    fn lossless(&mut self, op: jpegtran::Op) {
+        let Some(doc) = &self.doc else { return };
+        let Some(path) = doc.path.clone().filter(|p| jpegtran::is_jpeg(p)) else {
+            self.status = "Lossless rotation works on JPEG files".into();
+            return;
+        };
+        if doc.dirty {
+            self.status = "Save or undo your edits first: lossless rotation works on the file".into();
+            return;
+        }
+        let t = Instant::now();
+        match jpegtran::transform_file(&path, op) {
+            Ok(trimmed) => {
+                self.loader.invalidate(&path);
+                match loader::decode(&path) {
+                    Ok(d) => {
+                        self.doc = Some(Document::from_decoded(&Arc::new(d)));
+                        self.selection = None;
+                        self.view.fit = true;
+                    }
+                    Err(e) => self.load_error = Some(e),
+                }
+                self.status = format!(
+                    "Lossless {} saved ({:.0} ms){}",
+                    op.label().to_lowercase(),
+                    t.elapsed().as_secs_f64() * 1000.0,
+                    if trimmed { ". Trimmed the edge to whole JPEG blocks." } else { "" }
+                );
+            }
+            Err(e) => self.status = format!("Lossless transform failed: {e}"),
+        }
+    }
+
     fn shape_colors(&self, c: Color32, other: Color32) -> (Option<Color32>, Option<Color32>) {
         match self.shape_style {
             ShapeStyle::Outline => (Some(c), None),
@@ -1606,7 +1734,10 @@ impl App {
                         };
                         row("File", d.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "(untitled)".into()));
                         row("Dimensions", format!("{w} × {h} ({:.1} MP)", (w as f64 * h as f64) / 1e6));
-                        row("Format", d.format.map(|f| format!("{f:?}")).unwrap_or_else(|| "-".into()));
+                        row("Format", if d.format.is_empty() { "-".into() } else { d.format.clone() });
+                        if let Some(n) = d.source.as_ref().and_then(|s| s.frames.get()).map(|f| f.len()) {
+                            row("Frames", n.to_string());
+                        }
                         row("File size", human_size(d.file_size));
                         row("Memory", human_size(d.image.as_raw().len() as u64));
                         row("Alpha channel", if d.has_alpha { "yes" } else { "no" }.into());
@@ -1713,7 +1844,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.strong(format!("Input files: {}", b.inputs.len()));
                     if ui.button("Add files…").clicked()
-                        && let Some(files) = rfd::FileDialog::new().add_filter("Images", loader::EXTENSIONS).pick_files() {
+                        && let Some(files) = rfd::FileDialog::new().add_filter("Images", loader::extensions()).pick_files() {
                             add_unique(&mut b.inputs, files);
                         }
                     if ui.button("Add folder…").clicked()
@@ -1770,6 +1901,14 @@ impl App {
                             ui.selectable_value(&mut b.save.png_level, PngLevel::Fast, "Fast");
                             ui.selectable_value(&mut b.save.png_level, PngLevel::Default, "Default");
                             ui.selectable_value(&mut b.save.png_level, PngLevel::Best, "Best");
+                        });
+                        ui.end_row();
+                    }
+                    if b.format == OutFormat::Webp {
+                        ui.label("WebP");
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut b.save.webp_lossless, "Lossless");
+                            ui.add_enabled(!b.save.webp_lossless, egui::Slider::new(&mut b.save.webp_quality, 1..=100).text("quality"));
                         });
                         ui.end_row();
                     }
@@ -1962,6 +2101,8 @@ impl App {
         self.handle_drops(&ctx);
         self.shortcuts(&ctx);
 
+        self.animate(&ctx);
+
         // Keep GPU textures in sync with the document.
         match &self.doc {
             Some(doc) if doc.version != self.uploaded_version => {
@@ -2029,6 +2170,8 @@ const HELP: &[(&str, &str)] = &[
     ("H / V", "Flip horizontal / vertical"),
     ("Ctrl+Y", "Crop to selection"),
     ("Ctrl+R", "Resize"),
+    ("Ctrl+Shift+R / Ctrl+Shift+L", "Lossless JPEG rotate right / left (on the file)"),
+    ("P", "Pause / play animation"),
     ("Ctrl+Shift+I", "Invert colors"),
     ("Ctrl+G", "Grayscale"),
     ("Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"),

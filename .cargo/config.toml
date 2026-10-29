@@ -1,0 +1,4 @@
+# Statically link the C runtime on Windows: the exe needs no VC++
+# redistributable, and it matches libjpeg-turbo's static-CRT build.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

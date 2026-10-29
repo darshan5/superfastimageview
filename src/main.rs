@@ -6,10 +6,13 @@ mod convert;
 mod edit;
 mod gl;
 mod icon;
+mod jpegtran;
 mod loader;
 #[cfg(target_os = "macos")]
 mod macos;
 mod paint;
+mod platform;
+mod raw;
 #[cfg(windows)]
 mod preview;
 
@@ -60,8 +63,21 @@ struct Runner {
     close_pending: bool,
     next_repaint: Option<Instant>,
     first_image_shown: bool,
+    /// Test hook: `SFIV_SHOT=a.png@800,b.png@2000` saves rendered frames.
+    shots: Vec<(PathBuf, Instant)>,
     #[cfg(windows)]
     preview_version: u64,
+}
+
+fn parse_shots(started: Instant) -> Vec<(PathBuf, Instant)> {
+    let Some(spec) = std::env::var_os("SFIV_SHOT") else { return Vec::new() };
+    spec.to_string_lossy()
+        .split(',')
+        .filter_map(|s| {
+            let (path, ms) = s.rsplit_once('@')?;
+            Some((PathBuf::from(path), started + Duration::from_millis(ms.trim().parse().ok()?)))
+        })
+        .collect()
 }
 
 fn main() {
@@ -119,9 +135,13 @@ fn main() {
         close_pending: false,
         next_repaint: None,
         first_image_shown: false,
+        shots: parse_shots(started),
         #[cfg(windows)]
         preview_version: 0,
     };
+    if let Some(t) = runner.shots.iter().map(|s| s.1).min() {
+        runner.next_repaint = Some(t);
+    }
     event_loop.run_app(&mut runner).expect("run app");
 }
 
@@ -240,6 +260,14 @@ impl Runner {
         let px = [size.width, size.height];
         gpu.painter.clear(px, [0.094, 0.094, 0.094, 1.0]);
         gpu.painter.paint_and_update_textures(px, out.pixels_per_point, &prims, &mut out.textures_delta);
+        let now = Instant::now();
+        if let Some(i) = self.shots.iter().position(|s| s.1 <= now) {
+            let (path, _) = self.shots.remove(i);
+            save_frame(&gpu.gl.gl, px, &path);
+        }
+        if let Some(t) = self.shots.iter().map(|s| s.1).min() {
+            self.next_repaint = Some(self.next_repaint.map_or(t, |n| n.min(t)));
+        }
         window.pre_present_notify();
         gpu.gl.swap();
 
@@ -299,6 +327,22 @@ impl Runner {
             gpu.painter.destroy();
         }
         el.exit();
+    }
+}
+
+/// Reads back the frame being presented and writes it as a PNG.
+fn save_frame(gl: &glow::Context, [w, h]: [u32; 2], path: &std::path::Path) {
+    use glow::HasContext;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    unsafe {
+        gl.read_pixels(0, 0, w as i32, h as i32, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut buf)));
+    }
+    if let Some(mut img) = image::RgbaImage::from_raw(w, h, buf) {
+        image::imageops::flip_vertical_in_place(&mut img);
+        for p in img.pixels_mut() {
+            p.0[3] = 255;
+        }
+        let _ = img.save(path);
     }
 }
 

@@ -16,7 +16,10 @@ until pixels are on screen (`SFIV_TIMING=1` prints these):
 | 640×480 PNG          |               ~110 ms |   3 ms |
 | 1920×1080 JPEG       |               ~110 ms |  13 ms |
 | 4000×3000 JPEG       |               ~120 ms |  70 ms |
-| 6000×4000 JPEG       |           ~190–220 ms | 145 ms |
+| 6000×4000 JPEG       |           ~170–220 ms | 145 ms |
+| Sony ARW (embedded preview, full develop follows) | ~105 ms | 73 ms |
+| 24 MP Canon CR3 / Nikon NEF (embedded preview) | not measured | ~130 ms |
+| 12 MP HEIC (Windows codec) | ~730 ms | ~630 ms |
 
 The equivalent stock `eframe` app took ~370–410 ms on the same machine,
 because creating an OpenGL context costs ~300 ms on this driver. How we avoid
@@ -43,8 +46,19 @@ before the window.
 ## Features
 
 **Viewing**
-- JPEG, PNG, GIF (first frame), BMP, ICO, TIFF, WebP, TGA, QOI, PNM/PAM, HDR,
-  EXR, DDS, Farbfeld. Format is detected from content; EXIF orientation is applied.
+- JPEG, PNG/APNG, GIF, WebP, BMP, ICO, TIFF, TGA, QOI, PNM/PAM, HDR, EXR, DDS,
+  Farbfeld. Format is detected from content; EXIF orientation is applied.
+- **Animated GIF, WebP and APNG** play back (`P` pauses). The first frame shows
+  immediately and the rest decode in the background.
+- **HEIC/HEIF and AVIF** through the operating system's codecs: WIC on Windows,
+  ImageIO on macOS. On Windows, HEIC needs Microsoft's *HEIF Image Extensions* +
+  *HEVC Video Extensions* (AVIF needs *AV1 Video Extension*); the app tells you
+  if they're missing.
+- **Camera RAW** (CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2, PEF, SRW and ~20 more)
+  via the pure-Rust `rawler`. The camera's embedded JPEG preview is shown
+  instantly. If that preview is much smaller than the sensor, the full RAW is
+  developed in the background (~0.5 s for 24 MP) and swapped in. Batch
+  conversion always uses full resolution.
 - Browse the folder in natural sort order (`photo2` before `photo10`).
 - Wheel/pinch zoom around the cursor, fit-to-window, 1:1, pan, full screen.
 - Huge images are split into GPU-sized tiles. Mipmaps keep zoomed-out views smooth.
@@ -52,6 +66,12 @@ before the window.
 - Copy/paste images through the clipboard, drag and drop, move to trash.
 
 **Editing** (undo/redo, about 1 GB of history)
+- **Lossless JPEG rotate/flip** (Image → Lossless JPEG transform,
+  Ctrl+Shift+R / Ctrl+Shift+L). It rearranges DCT blocks with libjpeg-turbo, like
+  `jpegtran`, so there's no recompression. It composes with the file's EXIF
+  orientation and resets the tag. When the size isn't a multiple of the JPEG
+  block size, the partial edge block (at most 15 px) is trimmed, as
+  `jpegtran -trim` does.
 - Rotate 90°/180°, flip, invert, grayscale, crop to selection, resize (Nearest,
   Bilinear, Bicubic, Lanczos3; SIMD via `fast_image_resize`), new blank image.
 - Paint tools: brush, eraser (to secondary colour or transparent), line,
@@ -61,7 +81,8 @@ before the window.
   are re-uploaded to the GPU.
 
 **Conversion**
-- Save as JPEG (quality), PNG (compression level), WebP (lossless), BMP, GIF,
+- Save as JPEG (quality), PNG (compression level), WebP (lossy with quality, or
+  lossless; libwebp), BMP, GIF,
   TIFF, TGA, QOI, ICO, PPM. Saves go to a temp file first and are then renamed
   over the target, so a failed save never corrupts the original.
 - **Batch conversion** (`B`): files, folders (optionally recursive) or drag and
@@ -82,6 +103,8 @@ On macOS use Cmd instead of Ctrl. Press `F1` in the app for the full list.
 | `0` or `F` / `1` | Fit / actual size |
 | Enter / F11 / double-click | Full screen |
 | `R` / `L`, `H` / `V` | Rotate right/left, flip horizontal/vertical |
+| Ctrl+Shift+R / Ctrl+Shift+L | Lossless JPEG rotate right / left (rewrites the file) |
+| `P` | Pause / play animation |
 | Ctrl+Y | Crop to selection |
 | Ctrl+R | Resize |
 | Ctrl+Shift+I / Ctrl+G | Invert / grayscale |
@@ -96,14 +119,19 @@ On macOS use Cmd instead of Ctrl. Press `F1` in the app for the full list.
 
 ## Building
 
-You need Rust (stable, 2024 edition).
+You need Rust (stable, 2024 edition) and **CMake** (for libjpeg-turbo).
+NASM is optional: without it libjpeg-turbo builds without SIMD, which only the
+lossless transforms use.
 
 ```sh
 cargo run --release -- path/to/image.jpg
 cargo test
 ```
 
-**Windows** (needs MSVC Build Tools):
+**Windows** (needs MSVC Build Tools; their CMake works if it is on `PATH`, e.g.
+`...\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin`).
+The C runtime is linked statically (`.cargo/config.toml`), so the exe needs no
+VC++ redistributable:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1   # -> dist\SuperFastImageView.exe
@@ -130,6 +158,10 @@ Other tools:
   6000×4000, 4000×3000, 1080p and alpha test images for benchmarking.
 - `cargo run --example gen_icon` regenerates `assets/icon.png` and `assets/icon.ico`.
 - `SFIV_TIMING=1` prints startup timings to stderr.
+- `SFIV_SHOT=a.png@800,b.png@2000` saves the rendered frame at those times
+  (ms after start), for automated visual checks.
+- `SFIV_SAMPLES=<dir> cargo test --release decode_samples -- --nocapture`
+  decodes every file in a folder of real-world samples and prints timings.
 
 ## Architecture
 
@@ -138,7 +170,10 @@ Other tools:
 | `src/main.rs` | Event loop (winit + glutin + egui-winit + egui_glow, no eframe), startup ordering, GDI-preview → GPU hand-off |
 | `src/gl.rs` | OpenGL display/context creation, including the off-thread WGL worker |
 | `src/preview.rs` | Windows GDI preview painter |
-| `src/loader.rs` | Background decoding, LRU cache, folder listing |
+| `src/loader.rs` | Background decoding (format routing, animations), LRU cache, folder listing |
+| `src/raw.rs` | Camera RAW: embedded preview, full development |
+| `src/platform.rs` | HEIC/HEIF/AVIF via WIC (Windows) and ImageIO (macOS) |
+| `src/jpegtran.rs` | Lossless JPEG transforms and EXIF orientation handling |
 | `src/canvas.rs` | Tiled GPU textures, partial updates |
 | `src/app.rs` | UI: viewer, menus, tools, dialogs, shortcuts |
 | `src/edit.rs` | Whole-image operations |
@@ -148,18 +183,16 @@ Other tools:
 
 ## Status and known gaps
 
-- **The macOS build has not been run on a Mac yet.** It type-checks for
-  `aarch64-apple-darwin`, and CI builds it on `macos-14`, but the Finder "open
-  file" hook in `src/macos.rs` (which adds a method to winit's app delegate)
-  needs testing on real hardware.
-- Animated GIF/WebP show the first frame only.
-- AVIF, HEIC and camera RAW are not supported yet. AVIF/HEIC need native
-  codecs; platform decoders (WIC / ImageIO) would be the natural route.
-- WebP output is lossless only (limitation of the pure-Rust encoder).
-- Very large JPEGs are decode-bound (~145 ms for 24 MP). A further speed-up
-  would be DCT-domain downscaled decoding for the first preview (libjpeg-turbo,
-  WIC or ImageIO).
-- Rotations re-encode JPEGs (no lossless JPEG transform yet).
+- **The macOS app has not been run on a Mac yet.** CI builds it and runs the
+  tests on `macos-14`. Still untested on real hardware: the Finder "open file"
+  hook in `src/macos.rs` and HEIC/AVIF decoding through ImageIO.
+- HEIC decoding on Windows goes through the system HEVC codec and is slower
+  than JPEG (~630 ms for 12 MP).
+- Saving an animation writes the current frame only.
+- RAW development uses rawler's default pipeline; there are no exposure or
+  white-balance controls.
+- Very large JPEGs are decode-bound (~145 ms for 24 MP). libjpeg-turbo's
+  DCT-domain scaled decoding could cut the first preview further.
 
 ## License
 

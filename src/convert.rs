@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use image::codecs::{
     bmp::BmpEncoder, gif::GifEncoder, ico::IcoEncoder, jpeg::JpegEncoder, png, pnm::PnmEncoder,
-    qoi::QoiEncoder, tga::TgaEncoder, tiff::TiffEncoder, webp::WebPEncoder,
+    qoi::QoiEncoder, tga::TgaEncoder, tiff::TiffEncoder,
 };
 use image::{ImageEncoder, RgbImage, RgbaImage};
 use rayon::prelude::*;
@@ -62,7 +62,7 @@ impl OutFormat {
         match self {
             OutFormat::Jpeg => "JPEG",
             OutFormat::Png => "PNG",
-            OutFormat::Webp => "WebP (lossless)",
+            OutFormat::Webp => "WebP",
             OutFormat::Bmp => "BMP",
             OutFormat::Gif => "GIF",
             OutFormat::Tiff => "TIFF",
@@ -105,11 +105,13 @@ pub enum PngLevel {
 pub struct SaveOptions {
     pub jpeg_quality: u8,
     pub png_level: PngLevel,
+    pub webp_quality: u8,
+    pub webp_lossless: bool,
 }
 
 impl Default for SaveOptions {
     fn default() -> Self {
-        Self { jpeg_quality: 90, png_level: PngLevel::Fast }
+        Self { jpeg_quality: 90, png_level: PngLevel::Fast, webp_quality: 85, webp_lossless: false }
     }
 }
 
@@ -171,7 +173,15 @@ fn encode<W: Write + std::io::Seek>(
             png::PngEncoder::new_with_quality(w, level, png::FilterType::Adaptive)
                 .write_image(img.as_raw(), iw, ih, Rgba8)
         }
-        OutFormat::Webp => WebPEncoder::new_lossless(w).write_image(img.as_raw(), iw, ih, Rgba8),
+        OutFormat::Webp => {
+            // libwebp: lossy with quality, or (better-compressing) lossless.
+            let enc = webp::Encoder::from_rgba(img.as_raw(), iw, ih);
+            let mem = if opts.webp_lossless { enc.encode_lossless() } else { enc.encode(opts.webp_quality.clamp(1, 100) as f32) };
+            if mem.is_empty() {
+                return Err(image::ImageError::IoError(std::io::Error::other("WebP encoding failed")));
+            }
+            w.write_all(&mem).map_err(image::ImageError::IoError)
+        }
         OutFormat::Bmp => BmpEncoder::new(w).write_image(img.as_raw(), iw, ih, Rgba8),
         OutFormat::Gif => {
             let mut enc = GifEncoder::new_with_speed(w, 10);
