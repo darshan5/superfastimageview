@@ -1,0 +1,36 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SuperFastImageView-windows-x64
+          path: target/release/superfastimageview.exe
+
+  macos:
+    runs-on: macos-14 # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+      - run: bash scripts/bundle-macos.sh --dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SuperFastImageView-macos-arm64
+          path: dist/SuperFastImageView.dmg

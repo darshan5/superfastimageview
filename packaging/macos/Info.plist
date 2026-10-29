@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>SuperFastImageView</string>
+    <key>CFBundleDisplayName</key><string>SuperFastImageView</string>
+    <key>CFBundleIdentifier</key><string>com.superfastimageview.app</string>
+    <key>CFBundleExecutable</key><string>SuperFastImageView</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>__VERSION__</string>
+    <key>CFBundleVersion</key><string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.photography</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>JPG image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.jpeg</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>jpg</string><string>jpeg</string><string>jpe</string><string>jfif</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>PNG image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.png</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>png</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>GIF image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>com.compuserve.gif</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>gif</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>BMP image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>com.microsoft.bmp</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>bmp</string><string>dib</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>ICO image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>com.microsoft.ico</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>ico</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>TIF image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.tiff</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>tif</string><string>tiff</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>WEBP image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>org.webmproject.webp</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>webp</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>TGA image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>com.truevision.tga-image</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>tga</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>HDR image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.radiance</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>hdr</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>EXR image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>com.ilm.openexr-image</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>exr</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>DDS image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>com.microsoft.dds</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>dds</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>PBM image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.pbm</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>pbm</string><string>pgm</string><string>ppm</string><string>pnm</string><string>pam</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>QOI image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.qoi</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>qoi</string></array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>FF image</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.farbfeld</string></array>
+            <key>CFBundleTypeExtensions</key><array><string>ff</string></array>
+        </dict>
+    </array>
+</dict>
+</plist>
