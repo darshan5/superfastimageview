@@ -73,6 +73,31 @@ struct Runner {
     preview_version: u64,
 }
 
+/// Release builds abort on panic with no console, so record what happened.
+fn install_crash_log() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(dir) = settings::dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let text = format!(
+                "{} v{}
+{info}
+{}
+
+",
+                APP_NAME,
+                env!("CARGO_PKG_VERSION"),
+                std::backtrace::Backtrace::force_capture()
+            );
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("crash.log")) {
+                let _ = f.write_all(text.as_bytes());
+            }
+        }
+        default(info);
+    }));
+}
+
 fn parse_shots(started: Instant) -> Vec<(PathBuf, Instant)> {
     let Some(spec) = std::env::var_os("SFIV_SHOT") else { return Vec::new() };
     spec.to_string_lossy()
@@ -87,6 +112,7 @@ fn parse_shots(started: Instant) -> Vec<(PathBuf, Instant)> {
 fn main() {
     let started = Instant::now();
     let initial = std::env::args_os().nth(1).map(PathBuf::from);
+    install_crash_log();
 
     // Start decoding before anything else so it overlaps window and GL setup.
     let mut loader = loader::Loader::new();

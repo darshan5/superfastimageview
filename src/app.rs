@@ -519,6 +519,7 @@ impl App {
         self.doc = Some(Document::from_decoded(d));
         self.view.fit = true;
         self.selection = None;
+        self.hover = None;
         self.stroke = None;
         self.text_draft = None;
         self.prefetch();
@@ -1838,8 +1839,11 @@ impl App {
                 }
                 ui.separator();
                 ui.label(format!("{:.0}%", self.view.zoom * 100.0));
-                if let Some((x, y)) = self.hover {
-                    let p = doc.image.get_pixel(x, y).0;
+                // `hover` is set by the canvas, which runs after us, so it can be
+                // from a previous image (or size, after crop/resize) for one frame.
+                if let Some((x, y)) = self.hover
+                    && let Some(p) = doc.image.get_pixel_checked(x, y).map(|p| p.0)
+                {
                     ui.separator();
                     ui.label(format!("{x}, {y}  rgba({}, {}, {}, {})", p[0], p[1], p[2], p[3]));
                 }

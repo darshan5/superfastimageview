@@ -29,7 +29,8 @@ impl Default for Settings {
     }
 }
 
-fn path() -> Option<PathBuf> {
+/// Where settings and the crash log live.
+pub fn dir() -> Option<PathBuf> {
     #[cfg(windows)]
     let base = std::env::var_os("APPDATA").map(PathBuf::from);
     #[cfg(target_os = "macos")]
@@ -38,7 +39,11 @@ fn path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
-    Some(base?.join("superfastimageview").join("settings.txt"))
+    Some(base?.join("superfastimageview"))
+}
+
+fn path() -> Option<PathBuf> {
+    Some(dir()?.join("settings.txt"))
 }
 
 impl Settings {
