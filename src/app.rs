@@ -20,6 +20,7 @@ use crate::edit::{self, ResizeFilter};
 use crate::jpegtran;
 use crate::loader::{self, Decoded, Loader};
 use crate::paint::{self, Dirty};
+use crate::settings::Settings;
 use crate::thumbs::Thumbs;
 use crate::{metadata, text};
 
@@ -343,8 +344,15 @@ pub struct App {
     uploaded_version: u64,
     checker: Option<TextureHandle>,
     view: View,
-    fit_upscale: bool,
     title: String,
+    settings: Settings,
+    saved_settings: Settings,
+    /// Image size the window was last fitted to.
+    window_fitted: Option<(u32, u32)>,
+    /// Inner window size (points) for `main` to apply; see `Settings::window_fit`.
+    pub window_request: Option<Vec2>,
+    /// Wheel movement not yet turned into a next/previous step.
+    wheel_acc: f32,
 
     tool: Tool,
     primary: Color32,
@@ -364,7 +372,6 @@ pub struct App {
     text_focus: bool,
 
     thumbs: Thumbs,
-    show_strip: bool,
     /// The image the strip last scrolled to.
     strip_scrolled: Option<PathBuf>,
     grid: bool,
@@ -373,9 +380,6 @@ pub struct App {
     grid_cols: usize,
     grid_scroll: bool,
     slide: Option<Slideshow>,
-    slide_secs: f32,
-    slide_loop: bool,
-    slide_fullscreen: bool,
     /// (file, metadata found) for the info panel.
     meta_info: Option<(PathBuf, String)>,
 
@@ -393,6 +397,7 @@ pub struct App {
 
 impl App {
     pub fn new(ctx: &egui::Context, loader: Loader, initial: Option<PathBuf>) -> Self {
+        let settings = Settings::load();
         let mut app = Self {
             ctx: ctx.clone(),
             loader,
@@ -408,8 +413,12 @@ impl App {
             uploaded_version: 0,
             checker: None,
             view: View { zoom: 1.0, pan: Vec2::ZERO, fit: true },
-            fit_upscale: false,
             title: String::new(),
+            settings: settings.clone(),
+            saved_settings: settings,
+            window_fitted: None,
+            window_request: None,
+            wheel_acc: 0.0,
             tool: Tool::Hand,
             primary: Color32::BLACK,
             secondary: Color32::WHITE,
@@ -426,7 +435,6 @@ impl App {
             text_draft: None,
             text_focus: false,
             thumbs: Thumbs::new(ctx),
-            show_strip: false,
             strip_scrolled: None,
             grid: false,
             grid_cursor: 0,
@@ -434,9 +442,6 @@ impl App {
             grid_cols: 1,
             grid_scroll: false,
             slide: None,
-            slide_secs: 4.0,
-            slide_loop: true,
-            slide_fullscreen: true,
             meta_info: None,
             save_opts: SaveOptions::default(),
             resize_dlg: None,
@@ -840,7 +845,7 @@ impl App {
 
     fn fit_zoom(&self, area: Rect, w: u32, h: u32, ppp: f32) -> f32 {
         let z = (area.width() * ppp / w as f32).min(area.height() * ppp / h as f32);
-        if self.fit_upscale { z } else { z.min(1.0) }
+        if self.settings.fit_upscale { z } else { z.min(1.0) }
     }
 
     fn image_rect(&self, area: Rect, w: u32, h: u32, ppp: f32) -> Rect {
@@ -849,6 +854,33 @@ impl App {
         // Snap to physical pixels so 100% zoom is crisp.
         let min = Pos2::new((r.min.x * ppp).round() / ppp, (r.min.y * ppp).round() / ppp);
         Rect::from_min_size(min, r.size())
+    }
+
+    /// Keeps the image centered when it fits, and its edges at the window
+    /// edges when it is bigger: the image never floats around.
+    fn clamp_pan(&mut self, area: Rect, w: u32, h: u32, ppp: f32) {
+        let size = Vec2::new(w as f32, h as f32) * self.view.zoom / ppp;
+        let lim = ((size - area.size()) / 2.0).max(Vec2::ZERO);
+        self.view.pan = self.view.pan.clamp(-lim, lim);
+    }
+
+    /// Asks `main` to size the window so the image shows at 100%, or as large
+    /// as fits on the monitor.
+    fn fit_window_to_image(&mut self, ctx: &egui::Context, area: Rect, w: u32, h: u32, ppp: f32) {
+        let vp = ctx.input(|i| i.viewport().clone());
+        if vp.fullscreen == Some(true) || vp.maximized == Some(true) {
+            return;
+        }
+        let (Some(inner), Some(monitor)) = (vp.inner_rect, vp.monitor_size) else { return };
+        let deco = vp.outer_rect.map_or(Vec2::new(16.0, 40.0), |o| o.size() - inner.size());
+        // Menus, toolbar, panels: everything around the canvas.
+        let chrome = inner.size() - area.size();
+        // Leave room for the taskbar / dock.
+        let avail = (monitor * Vec2::new(0.96, 0.9) - deco - chrome).max(Vec2::splat(100.0));
+        let img = Vec2::new(w as f32, h as f32) / ppp;
+        let s = (avail.x / img.x).min(avail.y / img.y).min(1.0);
+        self.window_request = Some((img * s).ceil() + chrome);
+        self.view.fit = true;
     }
 
     fn zoom_about(&mut self, area: Rect, pivot: Pos2, factor: f32, ppp: f32) {
@@ -938,7 +970,7 @@ impl App {
         if let Some(s) = &mut self.slide {
             if pressed(Key::Space) {
                 s.paused = !s.paused;
-                s.next_at = Instant::now() + Duration::from_secs_f32(self.slide_secs);
+                s.next_at = Instant::now() + Duration::from_secs_f32(self.settings.slide_secs);
             }
             if pressed(Key::Escape) {
                 self.stop_slideshow(ctx);
@@ -1000,7 +1032,7 @@ impl App {
             }
         }
         if pressed(Key::T) {
-            self.show_strip = !self.show_strip;
+            self.settings.show_strip = !self.settings.show_strip;
         }
         if pressed(Key::G) {
             self.toggle_grid();
@@ -1098,7 +1130,7 @@ impl App {
             self.grid = false;
         }
         if pressed(Key::T) {
-            self.show_strip = !self.show_strip;
+            self.settings.show_strip = !self.settings.show_strip;
         }
         if pressed(Key::B) {
             self.open_batch();
@@ -1126,7 +1158,7 @@ impl App {
         }
         let from_grid = std::mem::take(&mut self.grid);
         let fs = is_fullscreen(ctx);
-        if self.slide_fullscreen && !fs {
+        if self.settings.slide_fullscreen && !fs {
             ctx.send_viewport_cmd(ViewportCommand::Fullscreen(true));
         }
         self.slide = Some(Slideshow { shown: None, next_at: Instant::now(), paused: false, was_fullscreen: fs });
@@ -1139,7 +1171,7 @@ impl App {
 
     fn stop_slideshow(&mut self, ctx: &egui::Context) {
         if let Some(s) = self.slide.take()
-            && self.slide_fullscreen
+            && self.settings.slide_fullscreen
             && !s.was_fullscreen
         {
             ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
@@ -1149,7 +1181,7 @@ impl App {
     /// Advances the slideshow. The timer starts once an image is on screen,
     /// so slow decodes don't eat into the display time.
     fn slideshow_tick(&mut self, ctx: &egui::Context) {
-        let secs = Duration::from_secs_f32(self.slide_secs);
+        let secs = Duration::from_secs_f32(self.settings.slide_secs);
         let Some(s) = &mut self.slide else { return };
         let current = self.doc.as_ref().and_then(|d| d.path.clone());
         if current.is_none() || current != self.target {
@@ -1169,7 +1201,7 @@ impl App {
         }
         s.next_at = now + secs;
         let at_end = self.index().is_some_and(|i| i + 1 == self.folder.len());
-        if (at_end && !self.slide_loop) || self.doc.as_ref().is_some_and(|d| d.dirty) {
+        if (at_end && !self.settings.slide_loop) || self.doc.as_ref().is_some_and(|d| d.dirty) {
             self.stop_slideshow(ctx);
             self.status = "Slideshow finished".into();
         } else {
@@ -1416,7 +1448,19 @@ impl App {
                 if ui.add(egui::Button::new("Actual size (100%)").shortcut_text("1")).clicked() {
                     self.set_zoom(1.0);
                 }
-                ui.checkbox(&mut self.fit_upscale, "Fit enlarges small images");
+                ui.checkbox(&mut self.settings.fit_upscale, "Fit enlarges small images");
+                ui.separator();
+                ui.label("Window size");
+                if ui.radio_value(&mut self.settings.window_fit, false, "Keep fixed").clicked() {
+                    self.window_fitted = None;
+                }
+                if ui.radio_value(&mut self.settings.window_fit, true, "Fit window to image").clicked() {
+                    self.window_fitted = None;
+                }
+                ui.label("Mouse wheel");
+                ui.radio_value(&mut self.settings.wheel_zoom, false, "Next / previous image");
+                ui.radio_value(&mut self.settings.wheel_zoom, true, "Zoom");
+                ui.weak("Ctrl+wheel always zooms.");
                 let mut px = self.canvas.pixelated;
                 if ui.checkbox(&mut px, "Pixelated zoom (nearest neighbour)").changed() {
                     self.canvas.pixelated = px;
@@ -1426,7 +1470,7 @@ impl App {
                 if ui.add(egui::Button::new("Full screen").shortcut_text("Enter / F11")).clicked() {
                     toggle_fullscreen(ui.ctx());
                 }
-                ui.checkbox(&mut self.show_strip, "Thumbnail strip (T)");
+                ui.checkbox(&mut self.settings.show_strip, "Thumbnail strip (T)");
                 let mut grid = self.grid;
                 if ui.checkbox(&mut grid, "Grid view (G)").changed() {
                     self.toggle_grid();
@@ -1440,9 +1484,9 @@ impl App {
                     } else if ui.add(egui::Button::new("Start slideshow").shortcut_text("F5")).clicked() {
                         self.start_slideshow(&ctx);
                     }
-                    ui.add(egui::Slider::new(&mut self.slide_secs, 0.5..=60.0).logarithmic(true).suffix(" s").text("Delay"));
-                    ui.checkbox(&mut self.slide_loop, "Loop");
-                    ui.checkbox(&mut self.slide_fullscreen, "Full screen");
+                    ui.add(egui::Slider::new(&mut self.settings.slide_secs, 0.5..=60.0).logarithmic(true).suffix(" s").text("Delay"));
+                    ui.checkbox(&mut self.settings.slide_loop, "Loop");
+                    ui.checkbox(&mut self.settings.slide_fullscreen, "Full screen");
                     ui.weak("Space pauses, arrows step.");
                 });
                 if ui.add(egui::Button::new("Image info").shortcut_text("I")).clicked() {
@@ -1530,8 +1574,8 @@ impl App {
                 self.open_batch();
             }
             ui.separator();
-            if ui.selectable_label(self.show_strip, "Thumbs").on_hover_text("Thumbnail strip (T)").clicked() {
-                self.show_strip = !self.show_strip;
+            if ui.selectable_label(self.settings.show_strip, "Thumbs").on_hover_text("Thumbnail strip (T)").clicked() {
+                self.settings.show_strip = !self.settings.show_strip;
             }
             if ui.selectable_label(self.grid, "Grid").on_hover_text("Grid view (G)").clicked() {
                 self.toggle_grid();
@@ -1604,7 +1648,7 @@ impl App {
         }
         ui.add_space(8.0);
         ui.weak(match self.tool {
-            Tool::Hand => "Drag to pan, wheel to zoom.",
+            Tool::Hand => "Drag scrolls a zoomed-in image. Ctrl+wheel zooms.",
             Tool::Select => "Drag to select. Ctrl+Y crops, Ctrl+C copies.",
             Tool::Picker => "Left: pick primary. Right: pick secondary.",
             Tool::Line | Tool::Rect | Tool::Ellipse => "Shift constrains. Right button uses secondary color.",
@@ -1844,28 +1888,59 @@ impl App {
         };
 
         let (iw, ih) = doc.image.dimensions();
+        if self.settings.window_fit && self.window_fitted != Some((iw, ih)) {
+            self.window_fitted = Some((iw, ih));
+            self.fit_window_to_image(&ctx, area, iw, ih, ppp);
+        }
         if self.view.fit {
             self.view.zoom = self.fit_zoom(area, iw, ih, ppp);
             self.view.pan = Vec2::ZERO;
         }
 
-        // Zoom with wheel / pinch around the cursor.
+        // Wheel: next/previous image, or zoom around the cursor (setting).
+        // Pinch and Ctrl+wheel (egui turns it into a zoom delta) always zoom.
         if let Some(pos) = resp.hover_pos() {
-            let (scroll, pinch) = ctx.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
-            let factor = pinch * (scroll * 0.0025).exp();
+            let (smooth, pinch) = ctx.input(|i| (i.smooth_scroll_delta.y, i.zoom_delta()));
+            let page = area.height();
+            let raw: f32 = ctx.input(|i| {
+                i.events
+                    .iter()
+                    .filter_map(|e| match e {
+                        egui::Event::MouseWheel { unit, delta, modifiers, .. } if !modifiers.ctrl && !modifiers.command => {
+                            Some(match unit {
+                                egui::MouseWheelUnit::Point => delta.y,
+                                egui::MouseWheelUnit::Line => delta.y * 50.0,
+                                egui::MouseWheelUnit::Page => delta.y * page,
+                            })
+                        }
+                        _ => None,
+                    })
+                    .sum()
+            });
+            let mut factor = pinch;
+            if self.settings.wheel_zoom {
+                factor *= (smooth * 0.0025).exp();
+            } else if raw != 0.0 {
+                // One notch is 50 points; touchpads send many small steps.
+                self.wheel_acc += raw;
+                if self.wheel_acc.abs() >= 40.0 {
+                    self.navigate(if self.wheel_acc > 0.0 { -1 } else { 1 });
+                    self.wheel_acc = 0.0;
+                }
+            }
             if (factor - 1.0).abs() > 1e-4 {
                 self.zoom_about(area, pos, factor, ppp);
             }
         }
 
-        // Pan.
+        // Dragging scrolls a zoomed-in image; one that fits stays put.
         let pan_drag = resp.dragged_by(PointerButton::Middle)
             || (self.tool == Tool::Hand && resp.dragged_by(PointerButton::Primary))
             || (ctx.input(|i| i.key_down(Key::Space)) && resp.dragged_by(PointerButton::Primary));
         if pan_drag {
             self.view.pan += resp.drag_delta();
-            self.view.fit = false;
         }
+        self.clamp_pan(area, iw, ih, ppp);
         if self.tool == Tool::Hand && resp.double_clicked() {
             toggle_fullscreen(&ctx);
         }
@@ -1986,7 +2061,7 @@ impl App {
             }
         } else if drawing_tool && resp.hovered() {
             ctx.set_cursor_icon(if self.tool == Tool::Text { egui::CursorIcon::Text } else { egui::CursorIcon::Crosshair });
-        } else if pan_drag {
+        } else if pan_drag && (img_rect.width() > area.width() + 0.5 || img_rect.height() > area.height() + 0.5) {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
         }
 
@@ -2822,7 +2897,7 @@ impl App {
                 self.toolbar(ui);
             });
             egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-            if self.show_strip && !self.folder.is_empty() && !self.grid {
+            if self.settings.show_strip && !self.folder.is_empty() && !self.grid {
                 egui::Panel::bottom("strip").resizable(false).exact_size(96.0).show(ui, |ui| self.strip_ui(ui));
             }
             if self.show_tools {
@@ -2832,6 +2907,11 @@ impl App {
         egui::CentralPanel::no_frame().show(ui, |ui| if self.grid { self.grid_ui(ui) } else { self.canvas_ui(ui) });
 
         self.dialogs(&ctx);
+
+        if self.settings != self.saved_settings && !ctx.input(|i| i.pointer.any_down()) {
+            self.settings.save();
+            self.saved_settings = self.settings.clone();
+        }
 
         // Confirm before closing with unsaved edits.
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close
@@ -2849,9 +2929,10 @@ const HELP: &[(&str, &str)] = &[
     ("→ / Space / PgDn", "Next image"),
     ("← / Backspace / PgUp", "Previous image"),
     ("Home / End", "First / last image"),
-    ("Wheel, + / −", "Zoom"),
+    ("Wheel", "Next / previous image (or zoom: View menu)"),
+    ("Ctrl+wheel, + / −", "Zoom"),
     ("0 or F / 1", "Fit / actual size"),
-    ("Drag, middle-drag, Space+drag", "Pan"),
+    ("Drag, middle-drag, Space+drag", "Scroll a zoomed-in image"),
     ("Enter / F11 / double-click", "Full screen"),
     ("T", "Thumbnail strip"),
     ("G", "Grid view (arrows move, Enter opens, +/− size)"),

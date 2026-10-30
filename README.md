@@ -60,7 +60,15 @@ before the window.
   developed in the background (~0.5 s for 24 MP) and swapped in. Batch
   conversion always uses full resolution.
 - Browse the folder in natural sort order (`photo2` before `photo10`).
-- Wheel/pinch zoom around the cursor, fit-to-window, 1:1, pan, full screen.
+- The mouse wheel goes to the next / previous image in the folder (wrapping
+  around), or zooms around the cursor (View menu). Ctrl+wheel and pinch always
+  zoom. Fit-to-window, 1:1, full screen.
+- The image stays put: it is centered when it fits, and a zoomed-in image can
+  only be dragged as far as its edges.
+- Window size: keep it fixed, or fit the window to each image (100%, or as
+  large as fits on the screen).
+- View preferences are saved between runs (`%APPDATA%\superfastimageview` on
+  Windows, `~/Library/Application Support/superfastimageview` on macOS).
 - Huge images are split into GPU-sized tiles. Mipmaps keep zoomed-out views smooth.
 - Transparency checkerboard, pixel position and colour readout, image info panel.
 - Copy/paste images through the clipboard, drag and drop, move to trash.
@@ -125,7 +133,8 @@ On macOS use Cmd instead of Ctrl. Press `F1` in the app for the full list.
 |-----|--------|
 | → / Space / PgDn, ← / Backspace / PgUp | Next / previous image |
 | Home / End | First / last image |
-| Wheel, `+` / `-` | Zoom |
+| Wheel | Next / previous image (or zoom, see View menu) |
+| Ctrl+wheel, `+` / `-` | Zoom |
 | `0` or `F` / `1` | Fit / actual size |
 | Enter / F11 / double-click | Full screen |
 | `R` / `L`, `H` / `V` | Rotate right/left, flip horizontal/vertical |
@@ -207,6 +216,7 @@ Other tools:
 | `src/metadata.rs` | Lossless metadata removal for JPEG, PNG, WebP |
 | `src/thumbs.rs` | Background thumbnail decoding and texture cache |
 | `src/text.rs` | Font list and text rendering for the Text tool |
+| `src/settings.rs` | Preferences saved between runs |
 | `src/canvas.rs` | Tiled GPU textures, partial updates |
 | `src/app.rs` | UI: viewer, menus, tools, dialogs, shortcuts |
 | `src/edit.rs` | Whole-image operations |
@@ -229,7 +239,6 @@ Other tools:
 - Saving keeps no metadata at all (there's no "keep EXIF" option yet).
 - Placed text can't be edited after it's applied (it becomes pixels; use
   undo).
-- The strip, grid and slideshow settings aren't remembered between runs.
 
 ## License
 

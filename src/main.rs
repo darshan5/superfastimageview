@@ -14,6 +14,7 @@ mod macos;
 mod paint;
 mod platform;
 mod raw;
+mod settings;
 mod text;
 mod thumbs;
 #[cfg(windows)]
@@ -314,6 +315,9 @@ impl Runner {
             self.close_pending = true;
             window.request_redraw();
         }
+        if let Some(size) = self.app.window_request.take() {
+            fit_window(&window, size);
+        }
         if vo.repaint_delay.is_zero() {
             window.request_redraw();
         } else if vo.repaint_delay < Duration::from_secs(3600) {
@@ -334,6 +338,31 @@ impl Runner {
 }
 
 /// Reads back the frame being presented and writes it as a PNG.
+/// Sets the window's inner size (in points), keeping it on its monitor.
+fn fit_window(window: &Window, size: egui::Vec2) {
+    if window.is_maximized() || window.fullscreen().is_some() {
+        return;
+    }
+    let s = window.scale_factor();
+    let want = winit::dpi::PhysicalSize::new((size.x as f64 * s).round() as u32, (size.y as f64 * s).round() as u32);
+    let (inner, outer) = (window.inner_size(), window.outer_size());
+    if want == inner {
+        return;
+    }
+    let _ = window.request_inner_size(want);
+    let (Some(m), Ok(pos)) = (window.current_monitor(), window.outer_position()) else { return };
+    let ow = (want.width + outer.width.saturating_sub(inner.width)) as i32;
+    let oh = (want.height + outer.height.saturating_sub(inner.height)) as i32;
+    let (mp, ms) = (m.position(), m.size());
+    // Roughly the taskbar / dock, which winit can't tell us about.
+    let bottom = mp.y + ms.height as i32 - (48.0 * s) as i32;
+    let x = pos.x.min(mp.x + ms.width as i32 - ow).max(mp.x);
+    let y = pos.y.min(bottom - oh).max(mp.y);
+    if (x, y) != (pos.x, pos.y) {
+        window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+    }
+}
+
 fn save_frame(gl: &glow::Context, [w, h]: [u32; 2], path: &std::path::Path) {
     use glow::HasContext;
     let mut buf = vec![0u8; (w * h * 4) as usize];
