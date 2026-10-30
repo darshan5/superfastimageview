@@ -225,8 +225,18 @@ pub enum BatchResize {
     Exact(u32, u32),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BatchMode {
+    Convert,
+    /// Lossless metadata removal; files keep their format.
+    StripMetadata,
+}
+
 #[derive(Clone, Debug)]
 pub struct BatchSettings {
+    pub mode: BatchMode,
+    /// StripMetadata only: rewrite the originals instead of writing to `out_dir`.
+    pub in_place: bool,
     pub inputs: Vec<PathBuf>,
     pub out_dir: PathBuf,
     pub format: OutFormat,
@@ -236,8 +246,10 @@ pub struct BatchSettings {
     pub grayscale: bool,
     pub flip_h: bool,
     pub rotate_cw: bool,
-    /// `{name}` = original file stem, `{n}` = 1-based index (zero padded).
+    /// See [`output_name`].
     pub pattern: String,
+    /// The first value of `{n}`.
+    pub start: usize,
     pub overwrite: bool,
 }
 
@@ -252,13 +264,69 @@ pub struct BatchProgress {
     pub log: Mutex<Vec<String>>,
 }
 
-pub fn output_name(pattern: &str, input: &Path, index: usize, total: usize) -> String {
-    let stem = input.file_stem().unwrap_or_default().to_string_lossy();
-    let width = total.to_string().len().max(3);
+/// Name tokens for the batch file name pattern, with descriptions.
+pub const NAME_TOKENS: &[(&str, &str)] = &[
+    ("{name}", "original file name"),
+    ("{n}", "counter (zero padded)"),
+    ("{parent}", "folder name"),
+    ("{date}", "file date, YYYY-MM-DD"),
+    ("{ext}", "original extension"),
+    ("{w}", "output width"),
+    ("{h}", "output height"),
+];
+
+pub const NAME_PRESETS: &[&str] = &["{name}", "{name}_converted", "{n}", "{parent}_{n}", "{date}_{name}", "{name}_{w}x{h}"];
+
+/// The output file name (without extension) for input number `index` of
+/// `total`. `dims` are the output size if known; without them `{w}`/`{h}`
+/// show as "w"/"h" (for previews).
+pub fn output_name(pattern: &str, input: &Path, index: usize, total: usize, start: usize, dims: Option<(u32, u32)>) -> String {
     let pattern = if pattern.trim().is_empty() { "{name}" } else { pattern };
-    pattern
-        .replace("{name}", &stem)
-        .replace("{n}", &format!("{:0width$}", index + 1))
+    let mut out = pattern.replace("{name}", &input.file_stem().unwrap_or_default().to_string_lossy());
+    if out.contains("{n}") {
+        let width = (start + total.saturating_sub(1)).to_string().len().max(3);
+        out = out.replace("{n}", &format!("{:0width$}", start + index));
+    }
+    if out.contains("{parent}") {
+        let parent = input.parent().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy();
+        out = out.replace("{parent}", &parent);
+    }
+    if out.contains("{date}") {
+        out = out.replace("{date}", &file_date(input));
+    }
+    out = out.replace("{ext}", &input.extension().unwrap_or_default().to_string_lossy());
+    let (w, h) = dims.map_or(("w".to_string(), "h".to_string()), |(w, h)| (w.to_string(), h.to_string()));
+    out = out.replace("{w}", &w).replace("{h}", &h);
+    // Keep the result a plain file name.
+    out.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c }).collect()
+}
+
+pub fn needs_dims(pattern: &str) -> bool {
+    pattern.contains("{w}") || pattern.contains("{h}")
+}
+
+/// Modification date (UTC) as YYYY-MM-DD.
+fn file_date(path: &Path) -> String {
+    let secs = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs() as i64);
+    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Days since 1970-01-01 to (year, month, day); Howard Hinnant's algorithm.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
 }
 
 /// Starts a batch on a background thread. Progress is reported through the
@@ -267,7 +335,8 @@ pub fn start_batch(settings: BatchSettings, ctx: egui::Context) -> Arc<BatchProg
     let progress = Arc::new(BatchProgress { total: settings.inputs.len(), ..Default::default() });
     let p = progress.clone();
     std::thread::spawn(move || {
-        if let Err(e) = std::fs::create_dir_all(&settings.out_dir) {
+        let needs_dir = !(settings.mode == BatchMode::StripMetadata && settings.in_place);
+        if let Err(e) = if needs_dir { std::fs::create_dir_all(&settings.out_dir) } else { Ok(()) } {
             p.log.lock().unwrap().push(format!("Cannot create output folder: {e}"));
         } else {
             settings.inputs.par_iter().enumerate().for_each(|(i, input)| {
@@ -296,9 +365,31 @@ pub fn start_batch(settings: BatchSettings, ctx: egui::Context) -> Arc<BatchProg
 
 /// Returns `Ok(false)` when skipped because the output exists.
 fn convert_one(s: &BatchSettings, input: &Path, index: usize) -> Result<bool, String> {
-    let name = output_name(&s.pattern, input, index, s.inputs.len());
-    let out = s.out_dir.join(format!("{name}.{}", s.format.ext()));
-    if !s.overwrite && out.exists() {
+    let total = s.inputs.len();
+    if s.mode == BatchMode::StripMetadata {
+        if !crate::metadata::is_supported(input) {
+            return Err("metadata removal supports JPEG, PNG and WebP".into());
+        }
+        let out = if s.in_place {
+            input.to_path_buf()
+        } else {
+            let name = output_name(&s.pattern, input, index, total, s.start, None);
+            let ext = input.extension().unwrap_or_default().to_string_lossy();
+            let out = s.out_dir.join(format!("{name}.{ext}"));
+            if !s.overwrite && out.exists() {
+                return Ok(false);
+            }
+            out
+        };
+        crate::metadata::strip_file(input, &out)?;
+        return Ok(true);
+    }
+    // With {w}/{h} in the pattern the name is only known after resizing.
+    let early = (!needs_dims(&s.pattern)).then(|| output_name(&s.pattern, input, index, total, s.start, None));
+    if let Some(name) = &early
+        && !s.overwrite
+        && s.out_dir.join(format!("{name}.{}", s.format.ext())).exists()
+    {
         return Ok(false);
     }
     let decoded = crate::loader::decode(input)?;
@@ -329,6 +420,11 @@ fn convert_one(s: &BatchSettings, input: &Path, index: usize) -> Result<bool, St
     if s.grayscale {
         edit::grayscale(&mut img);
     }
+    let name = early.unwrap_or_else(|| output_name(&s.pattern, input, index, total, s.start, Some(img.dimensions())));
+    let out = s.out_dir.join(format!("{name}.{}", s.format.ext()));
+    if !s.overwrite && out.exists() {
+        return Ok(false);
+    }
     save(&img, &out, s.format, &s.save)?;
     Ok(true)
 }
@@ -340,9 +436,14 @@ mod tests {
     #[test]
     fn names() {
         let p = Path::new("C:/x/photo.jpeg");
-        assert_eq!(output_name("{name}", p, 0, 10), "photo");
-        assert_eq!(output_name("img_{n}", p, 4, 10), "img_005");
-        assert_eq!(output_name("", p, 4, 10), "photo");
+        assert_eq!(output_name("{name}", p, 0, 10, 1, None), "photo");
+        assert_eq!(output_name("img_{n}", p, 4, 10, 1, None), "img_005");
+        assert_eq!(output_name("", p, 4, 10, 1, None), "photo");
+        assert_eq!(output_name("{parent}-{n}.{ext}", p, 0, 5000, 10, None), "x-0010.jpeg");
+        assert_eq!(output_name("{name}_{w}x{h}", p, 0, 1, 1, Some((640, 480))), "photo_640x480");
+        assert_eq!(output_name("a/b:{name}", p, 0, 1, 1, None), "a_b_photo");
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(20_000), (2024, 10, 4));
     }
 
     #[test]
@@ -359,6 +460,8 @@ mod tests {
         }
         inputs.push(dir.join("missing.png"));
         let settings = BatchSettings {
+            mode: BatchMode::Convert,
+            in_place: false,
             inputs,
             out_dir: out_dir.clone(),
             format: OutFormat::Jpeg,
@@ -369,6 +472,7 @@ mod tests {
             flip_h: false,
             rotate_cw: false,
             pattern: "img_{n}".into(),
+            start: 1,
             overwrite: false,
         };
         let run = |s: BatchSettings| {
@@ -384,8 +488,13 @@ mod tests {
         let d = crate::loader::decode(&out_dir.join("img_001.jpg")).unwrap();
         assert_eq!(d.image.dimensions(), (50, 25));
         // Second run skips the three existing outputs.
-        let p = run(settings);
+        let p = run(settings.clone());
         assert_eq!(p.skipped.load(Ordering::Relaxed), 3);
+        // Metadata removal in place: PNGs are fine, the missing file fails.
+        let strip = BatchSettings { mode: BatchMode::StripMetadata, in_place: true, ..settings };
+        let p = run(strip);
+        assert_eq!(p.failed.load(Ordering::Relaxed), 1);
+        assert_eq!(p.done.load(Ordering::Relaxed), 4);
     }
 
     #[test]

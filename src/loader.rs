@@ -80,6 +80,12 @@ pub fn decode(path: &Path) -> Result<Decoded, String> {
     Ok(d)
 }
 
+/// The first frame (or RAW embedded preview) from bytes already read.
+pub fn decode_first_frame(path: &Path, data: &[u8]) -> Result<RgbaImage, String> {
+    let (d, _) = decode_first(path, data, Instant::now())?;
+    Ok(Arc::try_unwrap(d.image).unwrap_or_else(|a| (*a).clone()))
+}
+
 /// Decodes the first image; for animations also returns the frame iterator so
 /// the caller can show the first frame before decoding the rest.
 fn decode_first<'a>(path: &Path, data: &'a [u8], t: Instant) -> Result<(Decoded, Option<Rest<'a>>), String> {

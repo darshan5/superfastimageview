@@ -101,8 +101,17 @@ pub fn is_jpeg(path: &Path) -> bool {
 /// partial edge block had to be trimmed (a few pixels at most) because the
 /// image size isn't a multiple of the JPEG block size.
 pub fn transform(jpeg: &[u8], op: Op) -> Result<(Vec<u8>, bool), String> {
+    apply(jpeg, op_matrix(op))
+}
+
+/// The EXIF orientation of a JPEG (1 = normal).
+pub fn orientation(jpeg: &[u8]) -> u16 {
+    find_orientation(jpeg).map_or(1, |o| o.1)
+}
+
+fn apply(jpeg: &[u8], op: M) -> Result<(Vec<u8>, bool), String> {
     let orientation = find_orientation(jpeg);
-    let m = mul(op_matrix(op), orientation_matrix(orientation.map_or(1, |o| o.1)));
+    let m = mul(op, orientation_matrix(orientation.map_or(1, |o| o.1)));
     let tj = tj_op(m);
 
     let (mut out, trimmed) = if tj == TransformOp::None {

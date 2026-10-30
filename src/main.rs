@@ -8,11 +8,14 @@ mod gl;
 mod icon;
 mod jpegtran;
 mod loader;
+mod metadata;
 #[cfg(target_os = "macos")]
 mod macos;
 mod paint;
 mod platform;
 mod raw;
+mod text;
+mod thumbs;
 #[cfg(windows)]
 mod preview;
 

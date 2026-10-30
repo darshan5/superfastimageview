@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use egui::{
     Color32, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle,
@@ -13,11 +13,15 @@ use egui::{
 use image::RgbaImage;
 
 use crate::canvas::{Canvas, checker_texture};
-use crate::convert::{self, BatchProgress, BatchResize, BatchSettings, OutFormat, PngLevel, SaveOptions};
+use crate::convert::{
+    self, BatchMode, BatchProgress, BatchResize, BatchSettings, NAME_PRESETS, NAME_TOKENS, OutFormat, PngLevel, SaveOptions,
+};
 use crate::edit::{self, ResizeFilter};
 use crate::jpegtran;
 use crate::loader::{self, Decoded, Loader};
 use crate::paint::{self, Dirty};
+use crate::thumbs::Thumbs;
+use crate::{metadata, text};
 
 const APP_NAME: &str = "SuperFastImageView";
 const BG: Color32 = Color32::from_gray(24);
@@ -41,11 +45,17 @@ pub struct Document {
     pub decode_ms: f64,
     pub dirty: bool,
     pub version: u64,
-    undo: Vec<Arc<RgbaImage>>,
-    redo: Vec<Arc<RgbaImage>>,
+    undo: Vec<Step>,
+    redo: Vec<Step>,
     /// The decode this came from; animation frames arrive on it later.
     source: Option<Arc<Decoded>>,
     anim: Option<Anim>,
+}
+
+/// One undoable edit: the pixels on the other side of it, and its name.
+struct Step {
+    image: Arc<RgbaImage>,
+    label: &'static str,
 }
 
 /// Playback state of an animated GIF / WebP / APNG.
@@ -100,15 +110,15 @@ impl Document {
 
     /// Saves the current pixels for undo. Cheap: the pixels are shared until
     /// the next edit copies them (`Arc::make_mut`).
-    fn checkpoint(&mut self) {
+    fn checkpoint(&mut self, label: &'static str) {
         // Editing works on the current frame; the animation stops for good.
         self.anim = None;
         self.source = None;
-        self.undo.push(self.image.clone());
+        self.undo.push(Step { image: self.image.clone(), label });
         self.redo.clear();
-        let mut total: usize = self.undo.iter().map(|i| i.as_raw().len()).sum();
+        let mut total: usize = self.undo.iter().map(|s| s.image.as_raw().len()).sum();
         while self.undo.len() > 1 && (total > UNDO_BUDGET || self.undo.len() > 50) {
-            total -= self.undo.remove(0).as_raw().len();
+            total -= self.undo.remove(0).image.as_raw().len();
         }
     }
 
@@ -117,22 +127,24 @@ impl Document {
         self.dirty = true;
     }
 
-    fn replace(&mut self, img: RgbaImage) {
-        self.checkpoint();
+    fn replace(&mut self, img: RgbaImage, label: &'static str) {
+        self.checkpoint(label);
         self.image = Arc::new(img);
         self.touched();
     }
 
     fn undo(&mut self) -> bool {
-        let Some(prev) = self.undo.pop() else { return false };
-        self.redo.push(std::mem::replace(&mut self.image, prev));
+        let Some(step) = self.undo.pop() else { return false };
+        let current = std::mem::replace(&mut self.image, step.image);
+        self.redo.push(Step { image: current, label: step.label });
         self.touched();
         true
     }
 
     fn redo(&mut self) -> bool {
-        let Some(next) = self.redo.pop() else { return false };
-        self.undo.push(std::mem::replace(&mut self.image, next));
+        let Some(step) = self.redo.pop() else { return false };
+        let current = std::mem::replace(&mut self.image, step.image);
+        self.undo.push(Step { image: current, label: step.label });
         self.touched();
         true
     }
@@ -152,10 +164,11 @@ enum Tool {
     Rect,
     Ellipse,
     Fill,
+    Text,
 }
 
 impl Tool {
-    const ALL: [Tool; 9] = [
+    const ALL: [Tool; 10] = [
         Tool::Hand,
         Tool::Select,
         Tool::Picker,
@@ -165,6 +178,7 @@ impl Tool {
         Tool::Rect,
         Tool::Ellipse,
         Tool::Fill,
+        Tool::Text,
     ];
 
     fn label(self) -> &'static str {
@@ -178,6 +192,7 @@ impl Tool {
             Tool::Rect => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Fill => "Fill",
+            Tool::Text => "Text",
         }
     }
 
@@ -198,6 +213,30 @@ struct StrokeState {
     button: PointerButton,
     start: Pos2,
     last: Pos2,
+}
+
+/// Text being typed with the Text tool, not yet drawn into the image.
+struct TextDraft {
+    /// Top-left of the first line, in image pixels.
+    pos: Pos2,
+    content: String,
+    preview: Option<TextPreview>,
+}
+
+struct TextPreview {
+    key: (String, usize, u32, [u8; 4]),
+    img: RgbaImage,
+    ox: i32,
+    oy: i32,
+    tex: TextureHandle,
+}
+
+struct Slideshow {
+    /// The image whose timer is running.
+    shown: Option<PathBuf>,
+    next_at: Instant,
+    paused: bool,
+    was_fullscreen: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -225,6 +264,8 @@ struct NewDialog {
 
 struct BatchDialog {
     open: bool,
+    mode: BatchMode,
+    in_place: bool,
     inputs: Vec<PathBuf>,
     out_dir: String,
     format: OutFormat,
@@ -238,15 +279,20 @@ struct BatchDialog {
     flip_h: bool,
     rotate_cw: bool,
     pattern: String,
+    start: usize,
     overwrite: bool,
     recursive: bool,
     progress: Option<Arc<BatchProgress>>,
+    /// (pattern, inputs, start, mode) -> how many output names collide.
+    duplicates: Option<((String, usize, usize, BatchMode), usize)>,
 }
 
 impl Default for BatchDialog {
     fn default() -> Self {
         Self {
             open: false,
+            mode: BatchMode::Convert,
+            in_place: false,
             inputs: Vec::new(),
             out_dir: String::new(),
             format: OutFormat::Jpeg,
@@ -260,9 +306,11 @@ impl Default for BatchDialog {
             flip_h: false,
             rotate_cw: false,
             pattern: "{name}".into(),
+            start: 1,
             overwrite: false,
             recursive: false,
             progress: None,
+            duplicates: None,
         }
     }
 }
@@ -310,6 +358,26 @@ pub struct App {
     selection: Option<[u32; 4]>,
     hover: Option<(u32, u32)>,
     show_tools: bool,
+    text_font: usize,
+    text_size: f32,
+    text_draft: Option<TextDraft>,
+    text_focus: bool,
+
+    thumbs: Thumbs,
+    show_strip: bool,
+    /// The image the strip last scrolled to.
+    strip_scrolled: Option<PathBuf>,
+    grid: bool,
+    grid_cursor: usize,
+    grid_cell: f32,
+    grid_cols: usize,
+    grid_scroll: bool,
+    slide: Option<Slideshow>,
+    slide_secs: f32,
+    slide_loop: bool,
+    slide_fullscreen: bool,
+    /// (file, metadata found) for the info panel.
+    meta_info: Option<(PathBuf, String)>,
 
     save_opts: SaveOptions,
     resize_dlg: Option<ResizeDialog>,
@@ -353,6 +421,23 @@ impl App {
             selection: None,
             hover: None,
             show_tools: false,
+            text_font: 0,
+            text_size: 48.0,
+            text_draft: None,
+            text_focus: false,
+            thumbs: Thumbs::new(ctx),
+            show_strip: false,
+            strip_scrolled: None,
+            grid: false,
+            grid_cursor: 0,
+            grid_cell: 180.0,
+            grid_cols: 1,
+            grid_scroll: false,
+            slide: None,
+            slide_secs: 4.0,
+            slide_loop: true,
+            slide_fullscreen: true,
+            meta_info: None,
             save_opts: SaveOptions::default(),
             resize_dlg: None,
             new_dlg: None,
@@ -430,6 +515,7 @@ impl App {
         self.view.fit = true;
         self.selection = None;
         self.stroke = None;
+        self.text_draft = None;
         self.prefetch();
     }
 
@@ -570,6 +656,8 @@ impl App {
         match convert::save(&doc.image, &path, fmt, &self.save_opts) {
             Ok(()) => {
                 self.loader.invalidate(&path);
+                self.thumbs.invalidate(&path);
+                self.meta_info = None;
                 doc.path = Some(path.clone());
                 doc.dirty = false;
                 doc.file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -676,18 +764,18 @@ impl App {
 
     // -- edits --------------------------------------------------------------
 
-    fn transform(&mut self, f: impl FnOnce(&RgbaImage) -> RgbaImage) {
+    fn transform(&mut self, label: &'static str, f: impl FnOnce(&RgbaImage) -> RgbaImage) {
         if let Some(doc) = &mut self.doc {
             let img = f(&doc.image);
-            doc.replace(img);
+            doc.replace(img, label);
             self.selection = None;
             self.view.fit = true;
         }
     }
 
-    fn modify(&mut self, f: impl FnOnce(&mut RgbaImage)) {
+    fn modify(&mut self, label: &'static str, f: impl FnOnce(&mut RgbaImage)) {
         if let Some(doc) = &mut self.doc {
-            doc.checkpoint();
+            doc.checkpoint(label);
             f(Arc::make_mut(&mut doc.image));
             doc.touched();
         }
@@ -695,13 +783,14 @@ impl App {
 
     fn crop_to_selection(&mut self) {
         if let Some([x, y, w, h]) = self.selection {
-            self.transform(|img| edit::crop(img, x, y, w, h));
+            self.transform("Crop", |img| edit::crop(img, x, y, w, h));
         } else {
             self.status = "Select an area first (Select tool)".into();
         }
     }
 
     fn undo(&mut self) {
+        self.text_draft = None;
         if let Some(d) = &mut self.doc
             && d.undo() {
                 self.selection = None;
@@ -722,10 +811,19 @@ impl App {
         }
     }
 
+    /// Undo point for the current paint tool.
     fn checkpoint(&mut self) {
         if let Some(d) = &mut self.doc {
-            d.checkpoint();
+            d.checkpoint(self.tool.label());
         }
+    }
+
+    /// Undoes or redoes until `target` steps are on the undo stack.
+    fn history_jump(&mut self, target: usize) {
+        let Some(d) = &mut self.doc else { return };
+        while d.undo.len() > target && d.undo() {}
+        while d.undo.len() < target && d.redo() {}
+        self.selection = None;
     }
 
     /// Applies a paint operation and re-uploads only the touched pixels.
@@ -795,7 +893,9 @@ impl App {
         } else if k(cmd_shift, Key::L) {
             self.lossless(jpegtran::Op::RotateCcw);
         } else if k(cmd_shift, Key::I) {
-            self.modify(edit::invert);
+            self.modify("Invert colors", edit::invert);
+        } else if k(cmd, Key::E) {
+            self.strip_current();
         } else if k(cmd, Key::O) {
             self.open_dialog();
         } else if k(cmd, Key::S) {
@@ -807,7 +907,7 @@ impl App {
         } else if k(cmd, Key::R) {
             self.open_resize();
         } else if k(cmd, Key::G) {
-            self.modify(edit::grayscale);
+            self.modify("Grayscale", edit::grayscale);
         } else if k(cmd, Key::C) {
             self.copy();
         } else if k(cmd, Key::V) {
@@ -824,6 +924,26 @@ impl App {
 
         let none = Modifiers::NONE;
         let pressed = |key: Key| ctx.input_mut(|i| i.consume_key(none, key));
+        if self.grid {
+            self.grid_keys(ctx);
+            return;
+        }
+        if pressed(Key::F5) {
+            if self.slide.is_some() {
+                self.stop_slideshow(ctx);
+            } else {
+                self.start_slideshow(ctx);
+            }
+        }
+        if let Some(s) = &mut self.slide {
+            if pressed(Key::Space) {
+                s.paused = !s.paused;
+                s.next_at = Instant::now() + Duration::from_secs_f32(self.slide_secs);
+            }
+            if pressed(Key::Escape) {
+                self.stop_slideshow(ctx);
+            }
+        }
         if pressed(Key::ArrowRight) || pressed(Key::Space) || pressed(Key::PageDown) {
             self.navigate(1);
         }
@@ -837,16 +957,16 @@ impl App {
             self.go_to(self.folder.len().saturating_sub(1));
         }
         if pressed(Key::R) {
-            self.transform(edit::rotate_cw);
+            self.transform("Rotate right", edit::rotate_cw);
         }
         if pressed(Key::L) {
-            self.transform(edit::rotate_ccw);
+            self.transform("Rotate left", edit::rotate_ccw);
         }
         if pressed(Key::H) {
-            self.modify(edit::flip_h);
+            self.modify("Flip horizontal", edit::flip_h);
         }
         if pressed(Key::V) {
-            self.modify(edit::flip_v);
+            self.modify("Flip vertical", edit::flip_v);
         }
         if pressed(Key::Num0) || pressed(Key::F) {
             self.view.fit = true;
@@ -873,11 +993,17 @@ impl App {
         if pressed(Key::I) {
             self.show_info = !self.show_info;
         }
-        if pressed(Key::E) || pressed(Key::T) {
+        if pressed(Key::E) {
             self.show_tools = !self.show_tools;
             if !self.show_tools {
                 self.tool = Tool::Hand;
             }
+        }
+        if pressed(Key::T) {
+            self.show_strip = !self.show_strip;
+        }
+        if pressed(Key::G) {
+            self.toggle_grid();
         }
         if pressed(Key::P) {
             self.toggle_playback();
@@ -888,6 +1014,8 @@ impl App {
         if pressed(Key::Escape) {
             if self.stroke.is_some() {
                 self.stroke = None;
+            } else if self.text_draft.is_some() {
+                self.text_draft = None;
             } else if self.close_top_dialog() {
             } else if self.selection.is_some() {
                 self.selection = None;
@@ -919,6 +1047,220 @@ impl App {
             return true;
         }
         false
+    }
+
+    fn grid_keys(&mut self, ctx: &egui::Context) {
+        let pressed = |key: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, key));
+        let n = self.folder.len() as isize;
+        let cols = self.grid_cols.max(1) as isize;
+        let mut c = self.grid_cursor as isize;
+        let before = c;
+        if pressed(Key::ArrowRight) {
+            c += 1;
+        }
+        if pressed(Key::ArrowLeft) {
+            c -= 1;
+        }
+        if pressed(Key::ArrowDown) {
+            c += cols;
+        }
+        if pressed(Key::ArrowUp) {
+            c -= cols;
+        }
+        if pressed(Key::PageDown) {
+            c += cols * 4;
+        }
+        if pressed(Key::PageUp) {
+            c -= cols * 4;
+        }
+        if pressed(Key::Home) {
+            c = 0;
+        }
+        if pressed(Key::End) {
+            c = n - 1;
+        }
+        if c != before && n > 0 {
+            self.grid_cursor = c.clamp(0, n - 1) as usize;
+            self.grid_scroll = true;
+        }
+        let bigger = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Plus) || i.consume_key(Modifiers::NONE, Key::Equals));
+        if bigger {
+            self.grid_cell = (self.grid_cell * 1.2).min(420.0);
+        }
+        if pressed(Key::Minus) {
+            self.grid_cell = (self.grid_cell / 1.2).max(90.0);
+        }
+        if pressed(Key::Enter) && n > 0 {
+            self.grid = false;
+            self.go_to(self.grid_cursor);
+        }
+        if pressed(Key::G) || pressed(Key::Escape) {
+            self.grid = false;
+        }
+        if pressed(Key::T) {
+            self.show_strip = !self.show_strip;
+        }
+        if pressed(Key::B) {
+            self.open_batch();
+        }
+        if pressed(Key::F5) {
+            self.start_slideshow(ctx);
+        }
+        if pressed(Key::F1) {
+            self.show_help = !self.show_help;
+        }
+    }
+
+    fn toggle_grid(&mut self) {
+        self.grid = !self.grid;
+        if self.grid {
+            self.grid_cursor = self.index().unwrap_or(0);
+            self.grid_scroll = true;
+        }
+    }
+
+    fn start_slideshow(&mut self, ctx: &egui::Context) {
+        if self.folder.is_empty() {
+            self.status = "Open a folder of images first".into();
+            return;
+        }
+        let from_grid = std::mem::take(&mut self.grid);
+        let fs = is_fullscreen(ctx);
+        if self.slide_fullscreen && !fs {
+            ctx.send_viewport_cmd(ViewportCommand::Fullscreen(true));
+        }
+        self.slide = Some(Slideshow { shown: None, next_at: Instant::now(), paused: false, was_fullscreen: fs });
+        if from_grid {
+            self.go_to(self.grid_cursor);
+        } else if self.index().is_none() {
+            self.go_to(0);
+        }
+    }
+
+    fn stop_slideshow(&mut self, ctx: &egui::Context) {
+        if let Some(s) = self.slide.take()
+            && self.slide_fullscreen
+            && !s.was_fullscreen
+        {
+            ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
+        }
+    }
+
+    /// Advances the slideshow. The timer starts once an image is on screen,
+    /// so slow decodes don't eat into the display time.
+    fn slideshow_tick(&mut self, ctx: &egui::Context) {
+        let secs = Duration::from_secs_f32(self.slide_secs);
+        let Some(s) = &mut self.slide else { return };
+        let current = self.doc.as_ref().and_then(|d| d.path.clone());
+        if current.is_none() || current != self.target {
+            return; // still decoding; the loader wakes us
+        }
+        let now = Instant::now();
+        if s.shown != current {
+            s.shown = current;
+            s.next_at = now + secs;
+        }
+        if s.paused {
+            return;
+        }
+        if now < s.next_at {
+            ctx.request_repaint_after(s.next_at - now);
+            return;
+        }
+        s.next_at = now + secs;
+        let at_end = self.index().is_some_and(|i| i + 1 == self.folder.len());
+        if (at_end && !self.slide_loop) || self.doc.as_ref().is_some_and(|d| d.dirty) {
+            self.stop_slideshow(ctx);
+            self.status = "Slideshow finished".into();
+        } else {
+            self.navigate(1);
+        }
+    }
+
+    /// Re-reads the current file after it was rewritten on disk.
+    fn reload_from_disk(&mut self, path: &Path) {
+        self.loader.invalidate(path);
+        self.thumbs.invalidate(path);
+        self.meta_info = None;
+        match loader::decode(path) {
+            Ok(d) => {
+                self.doc = Some(Document::from_decoded(&Arc::new(d)));
+                self.selection = None;
+                self.view.fit = true;
+            }
+            Err(e) => self.load_error = Some(e),
+        }
+    }
+
+    /// Removes EXIF/XMP/IPTC from the current file, overwriting it.
+    fn strip_current(&mut self) {
+        let Some(doc) = &self.doc else { return };
+        let Some(path) = doc.path.clone() else {
+            self.status = "Save the image first".into();
+            return;
+        };
+        if !metadata::is_supported(&path) {
+            self.status = "Metadata removal works on JPEG, PNG and WebP files".into();
+            return;
+        }
+        if doc.dirty {
+            // Our encoders write no metadata, so saving over the file strips it too.
+            if let Some(f) = OutFormat::from_path(&path)
+                && self.save_to(path.clone(), f)
+            {
+                self.status = format!("Saved {} with edits and without metadata", path.display());
+            }
+            return;
+        }
+        let t = Instant::now();
+        match metadata::strip_file(&path, &path) {
+            Ok(None) => self.status = "No metadata to remove".into(),
+            Ok(Some(s)) => {
+                // Pixels are unchanged; only the file and its listings are stale.
+                self.loader.invalidate(&path);
+                self.thumbs.invalidate(&path);
+                self.meta_info = None;
+                if let Some(d) = &mut self.doc {
+                    d.file_size = s.data.len() as u64;
+                }
+                self.status = format!(
+                    "Removed metadata, {} smaller ({:.0} ms){}",
+                    human_size(s.removed as u64),
+                    t.elapsed().as_secs_f64() * 1000.0,
+                    if s.kept_orientation { ". Kept the rotation tag so it stays upright." } else { "" }
+                );
+            }
+            Err(e) => self.status = format!("Metadata removal failed: {e}"),
+        }
+    }
+
+    /// Renders the text preview when the text or its style changed.
+    fn refresh_text_preview(&mut self, ctx: &egui::Context) {
+        let color = rgba(self.primary);
+        let (font_i, size) = (self.text_font, self.text_size);
+        let Some(d) = &mut self.text_draft else { return };
+        let key = (d.content.clone(), font_i, size.to_bits(), color);
+        if d.preview.as_ref().is_some_and(|p| p.key == key) {
+            return;
+        }
+        d.preview = text::render(&text::font(font_i), size, &d.content, color).map(|(img, ox, oy)| {
+            let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+            let tex = ctx.load_texture("text-preview", ci, egui::TextureOptions::LINEAR);
+            TextPreview { key, img, ox, oy, tex }
+        });
+    }
+
+    /// Draws the pending text into the image.
+    fn commit_text(&mut self) {
+        let ctx = self.ctx.clone();
+        self.refresh_text_preview(&ctx);
+        let Some(d) = self.text_draft.take() else { return };
+        let Some(p) = d.preview else { return };
+        let (x, y) = (d.pos.x.round() as i32 + p.ox, d.pos.y.round() as i32 + p.oy);
+        if let Some(doc) = &mut self.doc {
+            doc.checkpoint("Text");
+        }
+        self.paint_op(|img| text::blend(img, &p.img, x, y));
     }
 
     fn open_batch(&mut self) {
@@ -969,6 +1311,18 @@ impl App {
                 if ui.add(egui::Button::new("Batch conversion…").shortcut_text("B")).clicked() {
                     self.open_batch();
                 }
+                if ui.add(egui::Button::new("Batch remove metadata…")).clicked() {
+                    self.open_batch();
+                    self.batch.mode = BatchMode::StripMetadata;
+                }
+                let can_strip = self.doc.as_ref().and_then(|d| d.path.as_deref()).is_some_and(metadata::is_supported);
+                if ui
+                    .add_enabled(can_strip, egui::Button::new("Remove metadata (overwrite)").shortcut_text(sc("Ctrl+E")))
+                    .on_hover_text("Removes EXIF, GPS, XMP and IPTC from the file without recompressing it")
+                    .clicked()
+                {
+                    self.strip_current();
+                }
                 ui.separator();
                 if ui.add_enabled(has_doc, egui::Button::new("Move to trash…").shortcut_text("Del")).clicked() {
                     self.confirm_delete = true;
@@ -985,6 +1339,9 @@ impl App {
                 }
                 if ui.add_enabled(can_redo, egui::Button::new("Redo").shortcut_text(sc("Ctrl+Shift+Z"))).clicked() {
                     self.redo();
+                }
+                if ui.button("History…").on_hover_text("Shown in the edit panel").clicked() {
+                    self.show_tools = true;
                 }
                 ui.separator();
                 if ui.add_enabled(has_doc, egui::Button::new("Copy").shortcut_text(sc("Ctrl+C"))).clicked() {
@@ -1005,13 +1362,13 @@ impl App {
             ui.menu_button("Image", |ui| {
                 ui.add_enabled_ui(has_doc, |ui| {
                     if ui.add(egui::Button::new("Rotate right").shortcut_text("R")).clicked() {
-                        self.transform(edit::rotate_cw);
+                        self.transform("Rotate right", edit::rotate_cw);
                     }
                     if ui.add(egui::Button::new("Rotate left").shortcut_text("L")).clicked() {
-                        self.transform(edit::rotate_ccw);
+                        self.transform("Rotate left", edit::rotate_ccw);
                     }
                     if ui.button("Rotate 180°").clicked() {
-                        self.modify(edit::rotate_180);
+                        self.modify("Rotate 180°", edit::rotate_180);
                     }
                     let can_lossless =
                         self.doc.as_ref().is_some_and(|d| !d.dirty && d.path.as_deref().is_some_and(jpegtran::is_jpeg));
@@ -1031,10 +1388,10 @@ impl App {
                         });
                     });
                     if ui.add(egui::Button::new("Flip horizontal").shortcut_text("H")).clicked() {
-                        self.modify(edit::flip_h);
+                        self.modify("Flip horizontal", edit::flip_h);
                     }
                     if ui.add(egui::Button::new("Flip vertical").shortcut_text("V")).clicked() {
-                        self.modify(edit::flip_v);
+                        self.modify("Flip vertical", edit::flip_v);
                     }
                     ui.separator();
                     if ui.add(egui::Button::new("Crop to selection").shortcut_text(sc("Ctrl+Y"))).clicked() {
@@ -1045,10 +1402,10 @@ impl App {
                     }
                     ui.separator();
                     if ui.add(egui::Button::new("Invert colors").shortcut_text(sc("Ctrl+Shift+I"))).clicked() {
-                        self.modify(edit::invert);
+                        self.modify("Invert colors", edit::invert);
                     }
                     if ui.add(egui::Button::new("Grayscale").shortcut_text(sc("Ctrl+G"))).clicked() {
-                        self.modify(edit::grayscale);
+                        self.modify("Grayscale", edit::grayscale);
                     }
                 });
             });
@@ -1069,6 +1426,25 @@ impl App {
                 if ui.add(egui::Button::new("Full screen").shortcut_text("Enter / F11")).clicked() {
                     toggle_fullscreen(ui.ctx());
                 }
+                ui.checkbox(&mut self.show_strip, "Thumbnail strip (T)");
+                let mut grid = self.grid;
+                if ui.checkbox(&mut grid, "Grid view (G)").changed() {
+                    self.toggle_grid();
+                }
+                ui.menu_button("Slideshow", |ui| {
+                    let ctx = ui.ctx().clone();
+                    if self.slide.is_some() {
+                        if ui.add(egui::Button::new("Stop slideshow").shortcut_text("F5 / Esc")).clicked() {
+                            self.stop_slideshow(&ctx);
+                        }
+                    } else if ui.add(egui::Button::new("Start slideshow").shortcut_text("F5")).clicked() {
+                        self.start_slideshow(&ctx);
+                    }
+                    ui.add(egui::Slider::new(&mut self.slide_secs, 0.5..=60.0).logarithmic(true).suffix(" s").text("Delay"));
+                    ui.checkbox(&mut self.slide_loop, "Loop");
+                    ui.checkbox(&mut self.slide_fullscreen, "Full screen");
+                    ui.weak("Space pauses, arrows step.");
+                });
                 if ui.add(egui::Button::new("Image info").shortcut_text("I")).clicked() {
                     self.show_info = !self.show_info;
                 }
@@ -1103,10 +1479,10 @@ impl App {
             let ctx = ui.ctx().clone();
             let area = ctx.content_rect();
             let ppp = ctx.pixels_per_point();
-            if ui.button("Zoom +").on_hover_text("Zoom in (+)").clicked() {
+            if ui.button(" + ").on_hover_text("Zoom in (+)").clicked() {
                 self.zoom_about(area, area.center(), 1.25, ppp);
             }
-            if ui.button("Zoom -").on_hover_text("Zoom out (−)").clicked() {
+            if ui.button(" − ").on_hover_text("Zoom out (−)").clicked() {
                 self.zoom_about(area, area.center(), 0.8, ppp);
             }
             if ui.selectable_label(self.view.fit, "Fit").on_hover_text("Fit to window (0)").clicked() {
@@ -1118,16 +1494,16 @@ impl App {
             ui.separator();
             ui.add_enabled_ui(self.doc.is_some(), |ui| {
                 if ui.button("Rotate L").on_hover_text("Rotate left (L)").clicked() {
-                    self.transform(edit::rotate_ccw);
+                    self.transform("Rotate left", edit::rotate_ccw);
                 }
                 if ui.button("Rotate R").on_hover_text("Rotate right (R)").clicked() {
-                    self.transform(edit::rotate_cw);
+                    self.transform("Rotate right", edit::rotate_cw);
                 }
                 if ui.button("Flip H").on_hover_text("Flip horizontal (H)").clicked() {
-                    self.modify(edit::flip_h);
+                    self.modify("Flip horizontal", edit::flip_h);
                 }
                 if ui.button("Flip V").on_hover_text("Flip vertical (V)").clicked() {
-                    self.modify(edit::flip_v);
+                    self.modify("Flip vertical", edit::flip_v);
                 }
                 if ui.button("Crop").on_hover_text("Crop to selection (Ctrl+Y)").clicked() {
                     self.crop_to_selection();
@@ -1152,6 +1528,17 @@ impl App {
             }
             if ui.button("Batch").on_hover_text("Batch conversion (B)").clicked() {
                 self.open_batch();
+            }
+            ui.separator();
+            if ui.selectable_label(self.show_strip, "Thumbs").on_hover_text("Thumbnail strip (T)").clicked() {
+                self.show_strip = !self.show_strip;
+            }
+            if ui.selectable_label(self.grid, "Grid").on_hover_text("Grid view (G)").clicked() {
+                self.toggle_grid();
+            }
+            if ui.button("Slideshow").on_hover_text("Slideshow (F5)").clicked() {
+                let ctx = ui.ctx().clone();
+                self.start_slideshow(&ctx);
             }
         });
     }
@@ -1212,14 +1599,182 @@ impl App {
         if self.tool == Tool::Eraser {
             ui.checkbox(&mut self.erase_transparent, "Erase to transparent");
         }
+        if self.tool == Tool::Text {
+            self.text_options(ui);
+        }
         ui.add_space(8.0);
         ui.weak(match self.tool {
             Tool::Hand => "Drag to pan, wheel to zoom.",
             Tool::Select => "Drag to select. Ctrl+Y crops, Ctrl+C copies.",
             Tool::Picker => "Left: pick primary. Right: pick secondary.",
             Tool::Line | Tool::Rect | Tool::Ellipse => "Shift constrains. Right button uses secondary color.",
+            Tool::Text => "Click to place, click again to move. Uses the primary color.",
             _ => "Left: primary color. Right: secondary.",
         });
+        self.history_ui(ui);
+    }
+
+    fn text_options(&mut self, ui: &mut Ui) {
+        let fonts = text::choices();
+        ui.label("Font");
+        egui::ComboBox::from_id_salt("font")
+            .width(150.0)
+            .selected_text(fonts.get(self.text_font).map_or("", |f| f.name))
+            .show_ui(ui, |ui| {
+                for (i, f) in fonts.iter().enumerate() {
+                    ui.selectable_value(&mut self.text_font, i, f.name);
+                }
+            });
+        ui.spacing_mut().slider_width = 90.0;
+        ui.add(egui::Slider::new(&mut self.text_size, 6.0..=1000.0).logarithmic(true).text("px"));
+        let (mut apply, mut cancel) = (false, false);
+        if let Some(d) = &mut self.text_draft {
+            let id = ui.make_persistent_id("text-tool-input");
+            // Ctrl+Enter applies; take it before the text field turns it into a newline.
+            let focused = ui.memory(|m| m.has_focus(id));
+            apply = focused && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
+            let resp = ui.add(
+                egui::TextEdit::multiline(&mut d.content)
+                    .id(id)
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .hint_text("Type here"),
+            );
+            if std::mem::take(&mut self.text_focus) {
+                resp.request_focus();
+            }
+            ui.horizontal(|ui| {
+                apply |= ui.button("Apply").on_hover_text(sc("Ctrl+Enter")).clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+        } else {
+            ui.weak("Click on the image to place text.");
+        }
+        if apply {
+            self.commit_text();
+        } else if cancel {
+            self.text_draft = None;
+        }
+    }
+
+    /// Undo history: click a step to go back (or forward) to it.
+    fn history_ui(&mut self, ui: &mut Ui) {
+        let Some(doc) = &self.doc else { return };
+        ui.separator();
+        ui.strong("History");
+        let n = doc.undo.len();
+        let mut jump = None;
+        egui::ScrollArea::vertical().id_salt("history").max_height(240.0).auto_shrink([false, true]).show(ui, |ui| {
+            if ui.selectable_label(n == 0, "Start").clicked() {
+                jump = Some(0);
+            }
+            for (i, s) in doc.undo.iter().enumerate() {
+                if ui.selectable_label(i + 1 == n, s.label).clicked() {
+                    jump = Some(i + 1);
+                }
+            }
+            // Undone steps, greyed out, in the order they'd be redone.
+            for (k, s) in doc.redo.iter().rev().enumerate() {
+                if ui.selectable_label(false, egui::RichText::new(s.label).weak()).clicked() {
+                    jump = Some(n + k + 1);
+                }
+            }
+        });
+        if let Some(j) = jump {
+            self.history_jump(j);
+        }
+    }
+
+    fn strip_ui(&mut self, ui: &mut Ui) {
+        const CELL: f32 = 92.0;
+        let n = self.folder.len();
+        let current = self.index();
+        let scroll_to = current.filter(|_| self.strip_scrolled.as_ref() != self.target.as_ref());
+        if scroll_to.is_some() {
+            self.strip_scrolled = self.target.clone();
+        }
+        let mut clicked = None;
+        // The mouse wheel scrolls the strip sideways.
+        ui.style_mut().always_scroll_the_only_direction = true;
+        egui::ScrollArea::horizontal().id_salt("strip").auto_shrink([false, false]).show_viewport(ui, |ui, vp| {
+            let height = ui.available_height();
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(n as f32 * CELL, height), Sense::hover());
+            let first = ((vp.min.x / CELL).floor() as isize - 2).max(0) as usize;
+            let last = ((vp.max.x / CELL).ceil() as usize + 2).min(n);
+            let cell_rect = |i: usize| Rect::from_min_size(rect.min + Vec2::new(i as f32 * CELL, 0.0), Vec2::new(CELL, height));
+            for i in first..last {
+                let r = cell_rect(i);
+                let resp = ui.interact(r, ui.scope_id().with(("strip", i)), Sense::click());
+                draw_thumb(ui, &mut self.thumbs, &self.folder[i], r.shrink(5.0), current == Some(i), resp.hovered());
+                if resp.on_hover_text(file_name(&self.folder[i])).clicked() {
+                    clicked = Some(i);
+                }
+            }
+            if let Some(i) = scroll_to {
+                ui.scroll_to_rect(cell_rect(i), Some(egui::Align::Center));
+            }
+        });
+        if let Some(i) = clicked {
+            self.go_to(i);
+        }
+    }
+
+    fn grid_ui(&mut self, ui: &mut Ui) {
+        let area = ui.max_rect();
+        ui.painter().rect_filled(area, 0.0, BG);
+        let n = self.folder.len();
+        if n == 0 {
+            let msg = if self.folder_rx.is_some() { "Reading folder…" } else { "No images in this folder" };
+            ui.painter().text(area.center(), egui::Align2::CENTER_CENTER, msg, egui::FontId::proportional(16.0), Color32::from_gray(160));
+            return;
+        }
+        let cell = self.grid_cell;
+        let row_h = cell + 18.0;
+        let cols = ((area.width() - 16.0) / cell).floor().max(1.0) as usize;
+        self.grid_cols = cols;
+        let rows = n.div_ceil(cols);
+        let pad = ((area.width() - cols as f32 * cell) / 2.0).max(0.0);
+        let scroll = std::mem::take(&mut self.grid_scroll);
+        let (mut clicked, mut opened) = (None, None);
+        egui::ScrollArea::vertical().id_salt("grid").auto_shrink([false, false]).show_viewport(ui, |ui, vp| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), rows as f32 * row_h + 16.0), Sense::hover());
+            let cell_rect = |i: usize| {
+                let (row, col) = (i / cols, i % cols);
+                Rect::from_min_size(rect.min + Vec2::new(pad + col as f32 * cell, 8.0 + row as f32 * row_h), Vec2::new(cell, row_h))
+            };
+            let first = ((vp.min.y / row_h).floor() as isize - 1).max(0) as usize;
+            let last = ((vp.max.y / row_h).ceil() as usize + 1).min(rows);
+            for i in first * cols..(last * cols).min(n) {
+                let r = cell_rect(i);
+                let resp = ui.interact(r, ui.scope_id().with(("grid", i)), Sense::click());
+                let thumb = Rect::from_min_size(r.min, Vec2::splat(cell)).shrink(10.0);
+                draw_thumb(ui, &mut self.thumbs, &self.folder[i], thumb, i == self.grid_cursor, resp.hovered());
+                let font = egui::FontId::proportional(12.0);
+                let name = elide(ui.painter(), &file_name(&self.folder[i]), &font, cell - 12.0);
+                ui.painter().text(
+                    Pos2::new(r.center().x, r.max.y - 12.0),
+                    egui::Align2::CENTER_CENTER,
+                    name,
+                    font,
+                    Color32::from_gray(if i == self.grid_cursor { 235 } else { 170 }),
+                );
+                if resp.double_clicked() {
+                    opened = Some(i);
+                } else if resp.clicked() {
+                    clicked = Some(i);
+                }
+            }
+            if scroll {
+                ui.scroll_to_rect(cell_rect(self.grid_cursor), None);
+            }
+        });
+        if let Some(i) = clicked {
+            self.grid_cursor = i;
+        }
+        if let Some(i) = opened {
+            self.grid = false;
+            self.go_to(i);
+        }
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
@@ -1271,6 +1826,7 @@ impl App {
         painter.rect_filled(area, 0.0, BG);
         let ctx = ui.ctx().clone();
         let ppp = ctx.pixels_per_point();
+        self.refresh_text_preview(&ctx);
 
         let Some(doc) = &self.doc else {
             let msg = if let Some(e) = &self.load_error {
@@ -1399,6 +1955,21 @@ impl App {
                 _ => {}
             }
         }
+        if let Some(d) = &self.text_draft {
+            let origin = to_screen(Pos2::new(d.pos.x.round(), d.pos.y.round()));
+            if let Some(p) = &d.preview {
+                let r = Rect::from_min_size(
+                    origin + Vec2::new(p.ox as f32, p.oy as f32) * scale,
+                    Vec2::new(p.img.width() as f32, p.img.height() as f32) * scale,
+                );
+                painter.image(p.tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                dashed_rect(&painter, r.expand(3.0));
+            }
+            // Caret at the text origin.
+            let caret = [origin, origin + Vec2::new(0.0, self.text_size * scale)];
+            painter.line_segment(caret, Stroke::new(3.0, Color32::BLACK));
+            painter.line_segment(caret, Stroke::new(1.0, Color32::WHITE));
+        }
         if let (Some([x, y, w, h]), None) = (self.selection, &self.stroke) {
             let r = Rect::from_min_max(
                 to_screen(Pos2::new(x as f32, y as f32)),
@@ -1414,9 +1985,18 @@ impl App {
                 ctx.set_cursor_icon(egui::CursorIcon::None);
             }
         } else if drawing_tool && resp.hovered() {
-            ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
+            ctx.set_cursor_icon(if self.tool == Tool::Text { egui::CursorIcon::Text } else { egui::CursorIcon::Crosshair });
         } else if pan_drag {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+
+        if self.slide.as_ref().is_some_and(|s| s.paused) {
+            let pos = Pos2::new(area.center().x, area.max.y - 40.0);
+            let font = egui::FontId::proportional(16.0);
+            let msg = "Slideshow paused: Space resumes, Esc stops";
+            let galley = painter.layout_no_wrap(msg.into(), font.clone(), Color32::WHITE);
+            painter.rect_filled(Rect::from_center_size(pos, galley.size() + Vec2::new(24.0, 12.0)), 6.0, Color32::from_black_alpha(170));
+            painter.text(pos, egui::Align2::CENTER_CENTER, msg, font, Color32::WHITE);
         }
 
         if self.tool == Tool::Hand {
@@ -1425,10 +2005,10 @@ impl App {
                     self.copy();
                 }
                 if ui.button("Rotate right").clicked() {
-                    self.transform(edit::rotate_cw);
+                    self.transform("Rotate right", edit::rotate_cw);
                 }
                 if ui.button("Rotate left").clicked() {
-                    self.transform(edit::rotate_ccw);
+                    self.transform("Rotate left", edit::rotate_ccw);
                 }
                 if ui.button("Fit to window").clicked() {
                     self.view.fit = true;
@@ -1501,15 +2081,7 @@ impl App {
         let t = Instant::now();
         match jpegtran::transform_file(&path, op) {
             Ok(trimmed) => {
-                self.loader.invalidate(&path);
-                match loader::decode(&path) {
-                    Ok(d) => {
-                        self.doc = Some(Document::from_decoded(&Arc::new(d)));
-                        self.selection = None;
-                        self.view.fit = true;
-                    }
-                    Err(e) => self.load_error = Some(e),
-                }
+                self.reload_from_disk(&path);
                 self.status = format!(
                     "Lossless {} saved ({:.0} ms){}",
                     op.label().to_lowercase(),
@@ -1566,6 +2138,13 @@ impl App {
                 }
                 self.paint_op(|img| paint::segment(img, p, p, size, c));
                 self.stroke = Some(StrokeState { tool: self.tool, button, start: p, last: p });
+            }
+            Tool::Text => {
+                match &mut self.text_draft {
+                    Some(d) => d.pos = p,
+                    None => self.text_draft = Some(TextDraft { pos: p, content: String::new(), preview: None }),
+                }
+                self.text_focus = true;
             }
             Tool::Select | Tool::Line | Tool::Rect | Tool::Ellipse => {
                 self.selection = None;
@@ -1683,7 +2262,7 @@ impl App {
             if apply {
                 let (w, h, f) = (dlg.w, dlg.h, dlg.filter);
                 self.resize_dlg = None;
-                self.transform(|img| edit::resize(img, w, h, f));
+                self.transform("Resize", |img| edit::resize(img, w, h, f));
             } else if !open {
                 self.resize_dlg = None;
             }
@@ -1721,6 +2300,18 @@ impl App {
 
         self.batch_window(ctx);
 
+        if self.show_info
+            && let Some(p) = self.doc.as_ref().and_then(|d| d.path.clone())
+            && self.meta_info.as_ref().is_none_or(|m| m.0 != p)
+        {
+            let found = if metadata::is_supported(&p) {
+                let kinds = std::fs::read(&p).map(|d| metadata::scan(&d)).unwrap_or_default();
+                if kinds.is_empty() { "none".to_string() } else { kinds.join(", ") }
+            } else {
+                "not checked for this format".to_string()
+            };
+            self.meta_info = Some((p, found));
+        }
         if self.show_info {
             let mut open = true;
             egui::Window::new("Image info").open(&mut open).resizable(false).show(ctx, |ui| {
@@ -1741,6 +2332,11 @@ impl App {
                         row("File size", human_size(d.file_size));
                         row("Memory", human_size(d.image.as_raw().len() as u64));
                         row("Alpha channel", if d.has_alpha { "yes" } else { "no" }.into());
+                        if let Some((mp, found)) = &self.meta_info
+                            && d.path.as_ref() == Some(mp)
+                        {
+                            row("Metadata", found.clone());
+                        }
                         row("Decode time", format!("{:.1} ms", d.decode_ms));
                         row("Undo steps", d.undo.len().to_string());
                     });
@@ -1839,8 +2435,13 @@ impl App {
         let b = &mut self.batch;
         let running = b.progress.as_ref().is_some_and(|p| !p.finished.load(Ordering::Relaxed));
         let mut start = false;
-        egui::Window::new("Batch conversion").open(&mut open).default_width(460.0).show(ctx, |ui| {
+        egui::Window::new("Batch conversion").open(&mut open).default_width(480.0).show(ctx, |ui| {
             ui.add_enabled_ui(!running, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut b.mode, BatchMode::Convert, "Convert / resize");
+                    ui.selectable_value(&mut b.mode, BatchMode::StripMetadata, "Remove metadata");
+                });
+                ui.separator();
                 ui.horizontal(|ui| {
                     ui.strong(format!("Input files: {}", b.inputs.len()));
                     if ui.button("Add files…").clicked()
@@ -1873,16 +2474,89 @@ impl App {
                     }
                 });
                 ui.separator();
+                let strip = b.mode == BatchMode::StripMetadata;
+                let in_place = strip && b.in_place;
                 egui::Grid::new("batch").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+                    if strip {
+                        ui.label("Write to");
+                        ui.checkbox(&mut b.in_place, "Overwrite the original files");
+                        ui.end_row();
+                    }
                     ui.label("Output folder");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut b.out_dir).desired_width(280.0));
-                        if ui.button("…").clicked()
-                            && let Some(d) = rfd::FileDialog::new().pick_folder() {
-                                b.out_dir = d.display().to_string();
-                            }
+                    ui.add_enabled_ui(!in_place, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut b.out_dir).desired_width(280.0));
+                            if ui.button("…").clicked()
+                                && let Some(d) = rfd::FileDialog::new().pick_folder() {
+                                    b.out_dir = d.display().to_string();
+                                }
+                        });
                     });
                     ui.end_row();
+                    if !in_place {
+                        ui.label("File name");
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::TextEdit::singleline(&mut b.pattern).desired_width(200.0));
+                                egui::ComboBox::from_id_salt("presets").selected_text("Presets").width(90.0).show_ui(ui, |ui| {
+                                    for p in NAME_PRESETS {
+                                        if ui.selectable_label(b.pattern == *p, *p).clicked() {
+                                            b.pattern = p.to_string();
+                                        }
+                                    }
+                                });
+                            });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                for (tok, what) in NAME_TOKENS {
+                                    if ui.small_button(*tok).on_hover_text(*what).clicked() {
+                                        b.pattern.push_str(tok);
+                                    }
+                                }
+                            });
+                            if b.pattern.contains("{n}") {
+                                ui.horizontal(|ui| {
+                                    ui.label("Numbers start at");
+                                    ui.add(egui::DragValue::new(&mut b.start).range(0..=1_000_000));
+                                });
+                            }
+                            if let Some(first) = b.inputs.first() {
+                                let ext = if strip {
+                                    first.extension().unwrap_or_default().to_string_lossy().into_owned()
+                                } else {
+                                    b.format.ext().to_string()
+                                };
+                                let name = convert::output_name(&b.pattern, first, 0, b.inputs.len(), b.start, None);
+                                ui.weak(format!("{} → {name}.{ext}", file_name(first)));
+                            }
+                            let key = (b.pattern.clone(), b.inputs.len(), b.start, b.mode);
+                            if b.duplicates.as_ref().is_none_or(|d| d.0 != key) {
+                                let total = b.inputs.len();
+                                let mut seen = std::collections::HashSet::new();
+                                let dups = b
+                                    .inputs
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(i, p)| {
+                                        let ext = if strip { p.extension().unwrap_or_default().to_string_lossy().to_lowercase() } else { String::new() };
+                                        let name = convert::output_name(&b.pattern, p, *i, total, b.start, None);
+                                        !seen.insert((name.to_lowercase(), ext))
+                                    })
+                                    .count();
+                                b.duplicates = Some((key, dups));
+                            }
+                            if let Some((_, d)) = b.duplicates.as_ref().filter(|d| d.1 > 0 && !convert::needs_dims(&b.pattern)) {
+                                ui.colored_label(
+                                    Color32::from_rgb(255, 190, 90),
+                                    format!("{d} files would get a name that's already taken; add {{n}} to keep them apart."),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    if strip {
+                        return;
+                    }
                     ui.label("Format");
                     egui::ComboBox::from_id_salt("fmt").selected_text(b.format.label()).show_ui(ui, |ui| {
                         for f in OutFormat::ALL {
@@ -1912,12 +2586,6 @@ impl App {
                         });
                         ui.end_row();
                     }
-                    ui.label("File name");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut b.pattern).desired_width(160.0));
-                        ui.weak("{name} = original, {n} = number");
-                    });
-                    ui.end_row();
                     ui.label("Resize");
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
@@ -1958,13 +2626,20 @@ impl App {
                         ui.checkbox(&mut b.grayscale, "Grayscale");
                     });
                     ui.end_row();
-                    ui.label("Existing files");
-                    ui.checkbox(&mut b.overwrite, "Overwrite");
-                    ui.end_row();
+                });
+                if !in_place {
+                    ui.checkbox(&mut b.overwrite, "Overwrite existing output files");
+                }
+                ui.weak(if strip {
+                    "JPEG, PNG and WebP. Removes EXIF (including GPS), XMP, IPTC and comments without recompressing. \
+                     ICC color profiles and the rotation tag are kept."
+                } else {
+                    "Converted files carry no metadata: EXIF, GPS and XMP are dropped."
                 });
                 ui.add_space(6.0);
-                let ready = !b.inputs.is_empty() && !b.out_dir.trim().is_empty();
-                start = ui.add_enabled(ready, egui::Button::new("Start conversion")).clicked();
+                let ready = !b.inputs.is_empty() && (in_place || !b.out_dir.trim().is_empty());
+                let label = if strip { "Remove metadata" } else { "Start conversion" };
+                start = ui.add_enabled(ready, egui::Button::new(label)).clicked();
             });
 
             if let Some(p) = &b.progress {
@@ -1977,7 +2652,7 @@ impl App {
                 ui.horizontal(|ui| {
                     if p.finished.load(Ordering::Relaxed) {
                         ui.label(format!(
-                            "Finished{}: {} converted, {failed} failed, {skipped} skipped",
+                            "Finished{}: {} done, {failed} failed, {skipped} skipped",
                             if p.cancel.load(Ordering::Relaxed) { " (cancelled)" } else { "" },
                             done.saturating_sub(failed + skipped)
                         ));
@@ -2006,6 +2681,8 @@ impl App {
                 _ => BatchResize::None,
             };
             let settings = BatchSettings {
+                mode: b.mode,
+                in_place: b.mode == BatchMode::StripMetadata && b.in_place,
                 inputs: b.inputs.clone(),
                 out_dir: PathBuf::from(b.out_dir.trim()),
                 format: b.format,
@@ -2016,6 +2693,7 @@ impl App {
                 flip_h: b.flip_h,
                 rotate_cw: b.rotate_cw,
                 pattern: b.pattern.clone(),
+                start: b.start,
                 overwrite: b.overwrite,
             };
             b.progress = Some(convert::start_batch(settings, ctx.clone()));
@@ -2097,9 +2775,15 @@ impl App {
         }
 
         self.pump();
+        self.thumbs.begin_frame();
         self.poll_background(&ctx);
         self.handle_drops(&ctx);
         self.shortcuts(&ctx);
+        self.slideshow_tick(&ctx);
+        // Switching away from the Text tool keeps what was typed.
+        if self.tool != Tool::Text && self.text_draft.is_some() {
+            self.commit_text();
+        }
 
         self.animate(&ctx);
 
@@ -2138,11 +2822,14 @@ impl App {
                 self.toolbar(ui);
             });
             egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+            if self.show_strip && !self.folder.is_empty() && !self.grid {
+                egui::Panel::bottom("strip").resizable(false).exact_size(96.0).show(ui, |ui| self.strip_ui(ui));
+            }
             if self.show_tools {
                 egui::Panel::left("tools").resizable(false).exact_size(170.0).show(ui, |ui| self.tools_panel(ui));
             }
         }
-        egui::CentralPanel::no_frame().show(ui, |ui| self.canvas_ui(ui));
+        egui::CentralPanel::no_frame().show(ui, |ui| if self.grid { self.grid_ui(ui) } else { self.canvas_ui(ui) });
 
         self.dialogs(&ctx);
 
@@ -2166,6 +2853,9 @@ const HELP: &[(&str, &str)] = &[
     ("0 or F / 1", "Fit / actual size"),
     ("Drag, middle-drag, Space+drag", "Pan"),
     ("Enter / F11 / double-click", "Full screen"),
+    ("T", "Thumbnail strip"),
+    ("G", "Grid view (arrows move, Enter opens, +/− size)"),
+    ("F5", "Slideshow (Space pauses, Esc stops)"),
     ("R / L", "Rotate right / left"),
     ("H / V", "Flip horizontal / vertical"),
     ("Ctrl+Y", "Crop to selection"),
@@ -2178,7 +2868,8 @@ const HELP: &[(&str, &str)] = &[
     ("Ctrl+C / Ctrl+V", "Copy / paste image"),
     ("Ctrl+O / Ctrl+S / Ctrl+Shift+S", "Open / save / save as"),
     ("Ctrl+N", "New image"),
-    ("E", "Toggle paint tools"),
+    ("E", "Paint tools, text and history"),
+    ("Ctrl+E", "Remove metadata (EXIF/GPS), overwriting the file"),
     ("B", "Batch conversion"),
     ("I", "Image info"),
     ("Del", "Move file to trash"),
@@ -2226,6 +2917,52 @@ fn dashed_rect(painter: &egui::Painter, r: Rect) {
     let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
     painter.add(egui::Shape::line(pts.to_vec(), Stroke::new(1.0, Color32::BLACK)));
     painter.add(egui::Shape::dashed_line(&pts, Stroke::new(1.0, Color32::WHITE), 4.0, 4.0));
+}
+
+/// Shortens `text` with an ellipsis in the middle, keeping the file
+/// extension, so it fits in `width` points.
+fn elide(painter: &egui::Painter, text: &str, font: &egui::FontId, width: f32) -> String {
+    let fits = |s: &str| painter.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE).size().x <= width;
+    if fits(text) {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let tail = text.rfind('.').map_or(0, |i| text[i..].chars().count()).min(8);
+    let suffix: String = chars[chars.len() - tail..].iter().collect();
+    for n in (1..chars.len() - tail).rev() {
+        let s: String = chars[..n].iter().collect::<String>() + "…" + &suffix;
+        if fits(&s) {
+            return s;
+        }
+    }
+    "…".to_string()
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name().unwrap_or_default().to_string_lossy().into_owned()
+}
+
+/// A thumbnail fitted into `r`, with selection / hover highlight.
+fn draw_thumb(ui: &Ui, thumbs: &mut Thumbs, path: &Path, r: Rect, selected: bool, hovered: bool) {
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(r.expand(4.0), 5.0, Color32::from_rgb(38, 79, 140));
+    } else if hovered {
+        painter.rect_filled(r.expand(4.0), 5.0, Color32::from_gray(52));
+    }
+    match thumbs.get(path).map(|t| (t.id(), t.size_vec2())) {
+        Some((tex, size)) => {
+            let k = (r.width() / size.x).min(r.height() / size.y);
+            let dst = Rect::from_center_size(r.center(), size * k);
+            painter.image(tex, dst, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
+        None if thumbs.failed(path) => {
+            painter.text(r.center(), egui::Align2::CENTER_CENTER, "?", egui::FontId::proportional(20.0), Color32::from_gray(120));
+        }
+        None => {
+            painter.rect_filled(r.shrink(r.width().min(r.height()) * 0.2), 3.0, Color32::from_gray(34));
+        }
+    }
 }
 
 fn human_size(b: u64) -> String {

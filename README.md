@@ -64,8 +64,17 @@ before the window.
 - Huge images are split into GPU-sized tiles. Mipmaps keep zoomed-out views smooth.
 - Transparency checkerboard, pixel position and colour readout, image info panel.
 - Copy/paste images through the clipboard, drag and drop, move to trash.
+- **Thumbnail strip** (`T`) and **grid view** (`G`; arrows move, Enter opens,
+  `+`/`-` resize). Thumbnails are decoded on a few background threads, only
+  for what is on screen. JPEGs use libjpeg-turbo's 1/8-scale DCT decode (a few
+  ms even for 24 MP), RAW files their embedded previews. Nothing starts until
+  you open one of these views, so startup is unaffected.
+- **Slideshow** (`F5`): adjustable delay, loop, full screen. Space pauses,
+  arrows step, Esc stops. The timer starts once each image is on screen, so
+  slow decodes don't shorten the display time.
 
-**Editing** (undo/redo, about 1 GB of history)
+**Editing** (undo/redo, about 1 GB of history, with a clickable **History**
+list in the edit panel)
 - **Lossless JPEG rotate/flip** (Image → Lossless JPEG transform,
   Ctrl+Shift+R / Ctrl+Shift+L). It rearranges DCT blocks with libjpeg-turbo, like
   `jpegtran`, so there's no recompression. It composes with the file's EXIF
@@ -79,6 +88,11 @@ before the window.
   tolerance, colour picker. Left button = primary colour, right = secondary,
   Shift constrains lines to 45° and boxes to squares. Only the changed pixels
   are re-uploaded to the GPU.
+- **Text tool**: click to place, click again to move, multi-line, any size,
+  anti-aliased. Fonts: two built in (Ubuntu Light and Hack, from egui) plus
+  common system fonts found on the machine (Arial, Segoe UI, Times, Georgia,
+  Consolas, Impact, Helvetica, Menlo, …). The preview is rendered exactly as it
+  will be drawn. Ctrl+Enter applies.
 
 **Conversion**
 - Save as JPEG (quality), PNG (compression level), WebP (lossy with quality, or
@@ -87,9 +101,21 @@ before the window.
   over the target, so a failed save never corrupts the original.
 - **Batch conversion** (`B`): files, folders (optionally recursive) or drag and
   drop. Options: output format, quality, resize (percent / fit within /
-  exact), rotate, flip, grayscale, name pattern (`{name}`, `{n}`), and
-  skip/overwrite existing files. Runs in parallel on all cores, with progress,
-  cancel and an error log.
+  exact), rotate, flip, grayscale, and skip/overwrite existing files. Runs in
+  parallel on all cores, with progress, cancel and an error log.
+- **File name patterns** for batch output: `{name}`, `{n}` (counter, zero
+  padded, adjustable start), `{parent}` (folder), `{date}` (file date),
+  `{ext}`, `{w}`/`{h}` (output size). Presets, a live example, and a warning
+  when several files would get the same name.
+- **Metadata removal**, lossless: Ctrl+E on the current file (overwrites it),
+  or as a batch task (in place, or into another folder). Removes EXIF
+  (including GPS), XMP, IPTC, comments and PNG text chunks from JPEG, PNG and
+  WebP without touching the compressed image data. ICC colour profiles are
+  kept, and so is the rotation: a rotated photo gets a minimal EXIF block
+  holding only the orientation tag. The info panel (`I`) lists the metadata a
+  file contains.
+- Saving or converting never writes metadata, so converted files carry no
+  EXIF/GPS either.
 
 ## Keyboard shortcuts
 
@@ -111,7 +137,11 @@ On macOS use Cmd instead of Ctrl. Press `F1` in the app for the full list.
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Ctrl+C / Ctrl+V | Copy / paste image |
 | Ctrl+O / Ctrl+S / Ctrl+Shift+S | Open / save / save as |
-| `E` | Paint tools panel |
+| `E` | Paint tools, text, history |
+| `T` / `G` | Thumbnail strip / grid view |
+| F5 | Slideshow (Space pauses, Esc stops) |
+| Ctrl+E | Remove metadata, overwriting the file |
+| Ctrl+Enter | Apply text (Text tool) |
 | `B` | Batch conversion |
 | `I` | Image info |
 | Del | Move to trash |
@@ -160,7 +190,7 @@ Other tools:
 - `SFIV_TIMING=1` prints startup timings to stderr.
 - `SFIV_SHOT=a.png@800,b.png@2000` saves the rendered frame at those times
   (ms after start), for automated visual checks.
-- `SFIV_SAMPLES=<dir> cargo test --release decode_samples -- --nocapture`
+- `SFIV_SAMPLES=<dir> cargo test --release <decode_samples|thumb_samples|strip_samples> -- --nocapture`
   decodes every file in a folder of real-world samples and prints timings.
 
 ## Architecture
@@ -174,6 +204,9 @@ Other tools:
 | `src/raw.rs` | Camera RAW: embedded preview, full development |
 | `src/platform.rs` | HEIC/HEIF/AVIF via WIC (Windows) and ImageIO (macOS) |
 | `src/jpegtran.rs` | Lossless JPEG transforms and EXIF orientation handling |
+| `src/metadata.rs` | Lossless metadata removal for JPEG, PNG, WebP |
+| `src/thumbs.rs` | Background thumbnail decoding and texture cache |
+| `src/text.rs` | Font list and text rendering for the Text tool |
 | `src/canvas.rs` | Tiled GPU textures, partial updates |
 | `src/app.rs` | UI: viewer, menus, tools, dialogs, shortcuts |
 | `src/edit.rs` | Whole-image operations |
@@ -191,8 +224,12 @@ Other tools:
 - Saving an animation writes the current frame only.
 - RAW development uses rawler's default pipeline; there are no exposure or
   white-balance controls.
-- Very large JPEGs are decode-bound (~145 ms for 24 MP). libjpeg-turbo's
-  DCT-domain scaled decoding could cut the first preview further.
+- Very large JPEGs are decode-bound (~145 ms for 24 MP). The scaled decode
+  the thumbnails use could also give a faster first preview.
+- Saving keeps no metadata at all (there's no "keep EXIF" option yet).
+- Placed text can't be edited after it's applied (it becomes pixels; use
+  undo).
+- The strip, grid and slideshow settings aren't remembered between runs.
 
 ## License
 

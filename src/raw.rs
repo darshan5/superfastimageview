@@ -90,3 +90,29 @@ fn develop_with(src: &RawSource, decoder: &dyn Decoder, orientation: Option<Orie
     }
     Ok(img)
 }
+
+/// A small embedded image for thumbnails: the smallest one that is at least
+/// `min_side` pixels on its long side, developing only as a last resort.
+pub fn thumbnail(data: &Arc<Vec<u8>>, min_side: u32) -> Result<DynamicImage, String> {
+    let (src, decoder) = open(data)?;
+    let params = RawDecodeParams::default();
+    let meta = decoder.raw_image(&src, &params, true).ok();
+    let orientation = meta.and_then(|r| Orientation::from_exif(r.orientation.to_u16() as u8));
+    let big_enough = |img: &DynamicImage| img.width().max(img.height()) >= min_side;
+    let found = decoder
+        .thumbnail_image(&src, &params)
+        .ok()
+        .flatten()
+        .filter(big_enough)
+        .or_else(|| decoder.preview_image(&src, &params).ok().flatten().filter(big_enough))
+        .or_else(|| decoder.full_image(&src, &params).ok().flatten());
+    match found {
+        Some(mut img) => {
+            if let Some(o) = orientation {
+                img.apply_orientation(o);
+            }
+            Ok(img)
+        }
+        None => develop_with(&src, decoder.as_ref(), orientation),
+    }
+}
