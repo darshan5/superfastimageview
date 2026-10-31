@@ -6,6 +6,8 @@ possible**. It also does basic editing (rotate, flip, invert, grayscale, crop,
 resize, brush/line/rectangle/ellipse/eraser/fill) and single or batch format
 conversion, in the spirit of IrfanView.
 
+![SuperFastImageView on Windows](assets/screenshot.png)
+
 ## Speed
 
 Measured on Windows 11, GTX 1650 SUPER, release build, from process start
