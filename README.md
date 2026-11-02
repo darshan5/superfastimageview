@@ -8,6 +8,21 @@ conversion, in the spirit of IrfanView.
 
 ![SuperFastImageView on Windows](assets/screenshot.png)
 
+## Download
+
+Get the latest build from
+[Releases](https://github.com/darshan5/superfastimageview/releases):
+
+- **Windows installer** (`…-windows-x64-setup.exe`): installs for your user
+  without admin rights (or for all users), adds Start menu and "Open with"
+  entries for every supported image type, and leaves your default apps alone.
+- **Windows portable** (`…-windows-x64.exe`): a single exe, nothing to install.
+- **macOS, Apple Silicon** (`…-macos-arm64.dmg`).
+
+None of these are code-signed yet, so Windows SmartScreen will warn on first
+run (More info → Run anyway), and on macOS right-click the app → Open the
+first time.
+
 ## Speed
 
 Measured on Windows 11, GTX 1650 SUPER, release build, from process start
@@ -142,6 +157,7 @@ On macOS use Cmd instead of Ctrl. Press `F1` in the app for the full list.
 | `R` / `L`, `H` / `V` | Rotate right/left, flip horizontal/vertical |
 | Ctrl+Shift+R / Ctrl+Shift+L | Lossless JPEG rotate right / left (rewrites the file) |
 | `P` | Pause / play animation |
+| `S` | Select tool (drag, then Crop) |
 | Ctrl+Y | Crop to selection |
 | Ctrl+R | Resize |
 | Ctrl+Shift+I / Ctrl+G | Invert / grayscale |
@@ -155,7 +171,7 @@ On macOS use Cmd instead of Ctrl. Press `F1` in the app for the full list.
 | Ctrl+Enter | Apply text (Text tool) |
 | `B` | Batch conversion |
 | `I` | Image info |
-| Del | Move to trash |
+| Del | Move to trash (asks first; can be turned off in the File menu) |
 | Esc | Close dialog → clear selection → leave full screen → quit |
 
 ## Building
@@ -244,4 +260,5 @@ Other tools:
 
 ## License
 
-MIT
+MIT. Toolbar icons are a subset of [Phosphor Icons](https://phosphoricons.com)
+(MIT, see `assets/icons-LICENSE.txt`).
