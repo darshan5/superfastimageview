@@ -22,6 +22,7 @@ use crate::loader::{self, Decoded, Loader};
 use crate::paint::{self, Dirty};
 use crate::settings::Settings;
 use crate::thumbs::Thumbs;
+use crate::icons::{self, icon};
 use crate::{metadata, text};
 
 const APP_NAME: &str = "SuperFastImageView";
@@ -169,9 +170,9 @@ enum Tool {
 }
 
 impl Tool {
-    const ALL: [Tool; 10] = [
+    /// The tools in the Edit panel. Select lives on the toolbar instead.
+    const PAINT: [Tool; 9] = [
         Tool::Hand,
-        Tool::Select,
         Tool::Picker,
         Tool::Brush,
         Tool::Eraser,
@@ -182,10 +183,25 @@ impl Tool {
         Tool::Text,
     ];
 
+    fn icon(self) -> char {
+        match self {
+            Tool::Hand => icons::HAND,
+            Tool::Select => icons::SELECT,
+            Tool::Picker => icons::PICKER,
+            Tool::Brush => icons::BRUSH,
+            Tool::Eraser => icons::ERASER,
+            Tool::Line => icons::LINE,
+            Tool::Rect => icons::RECT,
+            Tool::Ellipse => icons::ELLIPSE,
+            Tool::Fill => icons::FILL,
+            Tool::Text => icons::TEXT,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Tool::Hand => "Pan / view",
-            Tool::Select => "Select / crop",
+            Tool::Select => "Select",
             Tool::Picker => "Color picker",
             Tool::Brush => "Brush",
             Tool::Eraser => "Eraser",
@@ -390,6 +406,8 @@ pub struct App {
     show_help: bool,
     show_info: bool,
     confirm_delete: bool,
+    /// "Don't ask again" in the delete confirmation, applied on confirm.
+    delete_dont_ask: bool,
     pending: Option<Pending>,
     allow_close: bool,
     status: String,
@@ -450,11 +468,13 @@ impl App {
             show_help: false,
             show_info: false,
             confirm_delete: false,
+            delete_dont_ask: false,
             pending: None,
             allow_close: false,
             status: String::new(),
         };
         ctx.set_visuals(egui::Visuals::dark());
+        icons::install(ctx);
         if let Some(p) = initial {
             if p.is_dir() {
                 app.scan_folder(&p);
@@ -682,6 +702,17 @@ impl App {
         }
     }
 
+    fn request_delete(&mut self) {
+        if !self.doc.as_ref().is_some_and(|d| d.path.is_some()) {
+            return;
+        }
+        if self.settings.ask_before_delete {
+            self.confirm_delete = true;
+        } else {
+            self.delete_current();
+        }
+    }
+
     fn delete_current(&mut self) {
         let Some(path) = self.doc.as_ref().and_then(|d| d.path.clone()) else { return };
         if let Err(e) = trash::delete(&path) {
@@ -787,11 +818,23 @@ impl App {
         }
     }
 
+    fn toggle_select(&mut self) {
+        self.tool = if self.tool == Tool::Select { Tool::Hand } else { Tool::Select };
+    }
+
+    fn set_show_tools(&mut self, show: bool) {
+        self.show_tools = show;
+        // Select is on the toolbar, so it outlives the paint panel.
+        if !show && self.tool != Tool::Select {
+            self.tool = Tool::Hand;
+        }
+    }
+
     fn crop_to_selection(&mut self) {
         if let Some([x, y, w, h]) = self.selection {
             self.transform("Crop", |img| edit::crop(img, x, y, w, h));
         } else {
-            self.status = "Select an area first (Select tool)".into();
+            self.status = "Select an area first (Select button or S)".into();
         }
     }
 
@@ -912,6 +955,11 @@ impl App {
         if ctx.text_edit_focused() {
             return;
         }
+        // Nor while a modal question is up: it owns Enter/Esc, and arrows must
+        // not change the image the question is about.
+        if self.confirm_delete || self.pending.is_some() {
+            return;
+        }
         let cmd = Modifiers::COMMAND;
         let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
         let k = |m: Modifiers, key: Key| ctx.input_mut(|i| i.consume_key(m, key));
@@ -1014,8 +1062,8 @@ impl App {
             let ppp = ctx.pixels_per_point();
             self.zoom_about(area, area.center(), if zoom_in { 1.25 } else { 0.8 }, ppp);
         }
-        if pressed(Key::Delete) && self.doc.as_ref().is_some_and(|d| d.path.is_some()) {
-            self.confirm_delete = true;
+        if pressed(Key::Delete) {
+            self.request_delete();
         }
         if pressed(Key::Enter) || pressed(Key::F11) {
             toggle_fullscreen(ctx);
@@ -1027,10 +1075,10 @@ impl App {
             self.show_info = !self.show_info;
         }
         if pressed(Key::E) {
-            self.show_tools = !self.show_tools;
-            if !self.show_tools {
-                self.tool = Tool::Hand;
-            }
+            self.set_show_tools(!self.show_tools);
+        }
+        if pressed(Key::S) && self.doc.is_some() {
+            self.toggle_select();
         }
         if pressed(Key::T) {
             self.settings.show_strip = !self.settings.show_strip;
@@ -1358,8 +1406,9 @@ impl App {
                 }
                 ui.separator();
                 if ui.add_enabled(has_doc, egui::Button::new("Move to trash…").shortcut_text("Del")).clicked() {
-                    self.confirm_delete = true;
+                    self.request_delete();
                 }
+                ui.checkbox(&mut self.settings.ask_before_delete, "Ask before moving to trash");
                 if ui.add(egui::Button::new("Exit").shortcut_text("Esc")).clicked() {
                     ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                 }
@@ -1493,8 +1542,9 @@ impl App {
                 if ui.add(egui::Button::new("Image info").shortcut_text("I")).clicked() {
                     self.show_info = !self.show_info;
                 }
-                if ui.checkbox(&mut self.show_tools, "Paint tools panel (E)").changed() && !self.show_tools {
-                    self.tool = Tool::Hand;
+                let mut show = self.show_tools;
+                if ui.checkbox(&mut show, "Paint tools panel (E)").changed() {
+                    self.set_show_tools(show);
                 }
             });
             ui.menu_button("Help", |ui| {
@@ -1507,81 +1557,90 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Open").on_hover_text("Open (Ctrl+O)").clicked() {
+            if ui.button(icon(icons::OPEN)).on_hover_text("Open (Ctrl+O)").clicked() {
                 self.open_dialog();
             }
-            if ui.add_enabled(self.doc.is_some(), egui::Button::new("Save")).on_hover_text("Save (Ctrl+S)").clicked() {
+            if ui.add_enabled(self.doc.is_some(), egui::Button::new(icon(icons::SAVE))).on_hover_text("Save (Ctrl+S)").clicked() {
                 self.save();
             }
             ui.separator();
-            if ui.button("< Prev").on_hover_text("Previous (←)").clicked() {
+            if ui.button(icon(icons::PREV)).on_hover_text("Previous (←)").clicked() {
                 self.navigate(-1);
             }
-            if ui.button("Next >").on_hover_text("Next (→)").clicked() {
+            if ui.button(icon(icons::NEXT)).on_hover_text("Next (→)").clicked() {
                 self.navigate(1);
             }
             ui.separator();
             let ctx = ui.ctx().clone();
             let area = ctx.content_rect();
             let ppp = ctx.pixels_per_point();
-            if ui.button(" + ").on_hover_text("Zoom in (+)").clicked() {
+            if ui.button(icon(icons::ZOOM_IN)).on_hover_text("Zoom in (+)").clicked() {
                 self.zoom_about(area, area.center(), 1.25, ppp);
             }
-            if ui.button(" − ").on_hover_text("Zoom out (−)").clicked() {
+            if ui.button(icon(icons::ZOOM_OUT)).on_hover_text("Zoom out (−)").clicked() {
                 self.zoom_about(area, area.center(), 0.8, ppp);
             }
-            if ui.selectable_label(self.view.fit, "Fit").on_hover_text("Fit to window (0)").clicked() {
+            if ui.selectable_label(self.view.fit, icon(icons::FIT)).on_hover_text("Fit to window (0)").clicked() {
                 self.view.fit = true;
             }
-            if ui.button("1:1").on_hover_text("Actual size (1)").clicked() {
+            if ui.button(egui::RichText::new("1:1").size(15.0)).on_hover_text("Actual size (1)").clicked() {
                 self.set_zoom(1.0);
             }
             ui.separator();
             ui.add_enabled_ui(self.doc.is_some(), |ui| {
-                if ui.button("Rotate L").on_hover_text("Rotate left (L)").clicked() {
+                if ui.button(icon(icons::ROTATE_L)).on_hover_text("Rotate left (L)").clicked() {
                     self.transform("Rotate left", edit::rotate_ccw);
                 }
-                if ui.button("Rotate R").on_hover_text("Rotate right (R)").clicked() {
+                if ui.button(icon(icons::ROTATE_R)).on_hover_text("Rotate right (R)").clicked() {
                     self.transform("Rotate right", edit::rotate_cw);
                 }
-                if ui.button("Flip H").on_hover_text("Flip horizontal (H)").clicked() {
+                if ui.button(icon(icons::FLIP_H)).on_hover_text("Flip horizontal (H)").clicked() {
                     self.modify("Flip horizontal", edit::flip_h);
                 }
-                if ui.button("Flip V").on_hover_text("Flip vertical (V)").clicked() {
+                if ui.button(icon(icons::FLIP_V)).on_hover_text("Flip vertical (V)").clicked() {
                     self.modify("Flip vertical", edit::flip_v);
                 }
-                if ui.button("Crop").on_hover_text("Crop to selection (Ctrl+Y)").clicked() {
+                if ui
+                    .selectable_label(self.tool == Tool::Select, icon(icons::SELECT))
+                    .on_hover_text("Select: drag on the image to select an area (S)")
+                    .clicked()
+                {
+                    self.toggle_select();
+                }
+                if ui
+                    .add_enabled(self.selection.is_some(), egui::Button::new(icon(icons::CROP)))
+                    .on_hover_text("Crop to selection (Ctrl+Y)")
+                    .on_disabled_hover_text("Crop: select an area first")
+                    .clicked()
+                {
                     self.crop_to_selection();
                 }
-                if ui.button("Resize").on_hover_text("Resize (Ctrl+R)").clicked() {
+                if ui.button(icon(icons::RESIZE)).on_hover_text("Resize (Ctrl+R)").clicked() {
                     self.open_resize();
                 }
                 ui.separator();
-                if ui.button("Undo").on_hover_text("Undo (Ctrl+Z)").clicked() {
+                if ui.button(icon(icons::UNDO)).on_hover_text("Undo (Ctrl+Z)").clicked() {
                     self.undo();
                 }
-                if ui.button("Redo").on_hover_text("Redo (Ctrl+Shift+Z)").clicked() {
+                if ui.button(icon(icons::REDO)).on_hover_text("Redo (Ctrl+Shift+Z)").clicked() {
                     self.redo();
                 }
             });
             ui.separator();
-            if ui.selectable_label(self.show_tools, "Edit").on_hover_text("Paint tools (E)").clicked() {
-                self.show_tools = !self.show_tools;
-                if !self.show_tools {
-                    self.tool = Tool::Hand;
-                }
+            if ui.selectable_label(self.show_tools, icon(icons::EDIT)).on_hover_text("Edit: paint tools (E)").clicked() {
+                self.set_show_tools(!self.show_tools);
             }
-            if ui.button("Batch").on_hover_text("Batch conversion (B)").clicked() {
+            if ui.button(icon(icons::BATCH)).on_hover_text("Batch conversion (B)").clicked() {
                 self.open_batch();
             }
             ui.separator();
-            if ui.selectable_label(self.settings.show_strip, "Thumbs").on_hover_text("Thumbnail strip (T)").clicked() {
+            if ui.selectable_label(self.settings.show_strip, icon(icons::THUMBS)).on_hover_text("Thumbnail strip (T)").clicked() {
                 self.settings.show_strip = !self.settings.show_strip;
             }
-            if ui.selectable_label(self.grid, "Grid").on_hover_text("Grid view (G)").clicked() {
+            if ui.selectable_label(self.grid, icon(icons::GRID)).on_hover_text("Grid view (G)").clicked() {
                 self.toggle_grid();
             }
-            if ui.button("Slideshow").on_hover_text("Slideshow (F5)").clicked() {
+            if ui.button(icon(icons::SLIDESHOW)).on_hover_text("Slideshow (F5)").clicked() {
                 let ctx = ui.ctx().clone();
                 self.start_slideshow(&ctx);
             }
@@ -1590,8 +1649,8 @@ impl App {
 
     fn tools_panel(&mut self, ui: &mut Ui) {
         ui.add_space(4.0);
-        for t in Tool::ALL {
-            if ui.selectable_label(self.tool == t, t.label()).clicked() {
+        for t in Tool::PAINT {
+            if ui.add(egui::Button::selectable(self.tool == t, (icon(t.icon()), t.label()))).clicked() {
                 self.tool = t;
             }
         }
@@ -1599,7 +1658,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.color_edit_button_srgba(&mut self.primary).on_hover_text("Primary (left click)");
             ui.color_edit_button_srgba(&mut self.secondary).on_hover_text("Secondary (right click)");
-            if ui.small_button("Swap").on_hover_text("Swap colors").clicked() {
+            if ui.small_button(icon(icons::SWAP)).on_hover_text("Swap colors").clicked() {
                 std::mem::swap(&mut self.primary, &mut self.secondary);
             }
         });
@@ -2442,10 +2501,13 @@ impl App {
 
         if self.confirm_delete {
             let name = self.doc.as_ref().map(|d| d.name()).unwrap_or_default();
+            let mut dont_ask = self.delete_dont_ask;
             let modal = egui::Modal::new(egui::Id::unique("confirm-delete")).show(ctx, |ui| {
                 ui.heading("Move to trash?");
                 ui.label(&name);
-                ui.add_space(8.0);
+                ui.add_space(4.0);
+                ui.checkbox(&mut dont_ask, "Don't ask again").on_hover_text("Turn back on in the File menu");
+                ui.add_space(4.0);
                 let mut answer = None;
                 ui.horizontal(|ui| {
                     if ui.button("Move to trash").clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -2457,9 +2519,13 @@ impl App {
                 });
                 answer
             });
+            self.delete_dont_ask = dont_ask;
             match modal.inner {
                 Some(true) => {
                     self.confirm_delete = false;
+                    if self.delete_dont_ask {
+                        self.settings.ask_before_delete = false;
+                    }
                     self.delete_current();
                 }
                 Some(false) => self.confirm_delete = false,
@@ -2953,6 +3019,7 @@ const HELP: &[(&str, &str)] = &[
     ("Ctrl+C / Ctrl+V", "Copy / paste image"),
     ("Ctrl+O / Ctrl+S / Ctrl+Shift+S", "Open / save / save as"),
     ("Ctrl+N", "New image"),
+    ("S", "Select tool (drag to select, then Crop)"),
     ("E", "Paint tools, text and history"),
     ("Ctrl+E", "Remove metadata (EXIF/GPS), overwriting the file"),
     ("B", "Batch conversion"),

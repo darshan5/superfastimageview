@@ -6,6 +6,7 @@ mod convert;
 mod edit;
 mod gl;
 mod icon;
+mod icons;
 mod jpegtran;
 mod loader;
 mod metadata;
@@ -67,6 +68,7 @@ struct Runner {
     close_pending: bool,
     next_repaint: Option<Instant>,
     first_image_shown: bool,
+    first_ui_shown: bool,
     /// Test hook: `SFIV_SHOT=a.png@800,b.png@2000` saves rendered frames.
     shots: Vec<(PathBuf, Instant)>,
     #[cfg(windows)]
@@ -165,6 +167,7 @@ fn main() {
         close_pending: false,
         next_repaint: None,
         first_image_shown: false,
+        first_ui_shown: false,
         shots: parse_shots(started),
         #[cfg(windows)]
         preview_version: 0,
@@ -281,6 +284,7 @@ impl Runner {
         let mut input = gpu.egui_winit.take_egui_input(&window);
         input.viewports.insert(ViewportId::ROOT, self.viewport_info.clone());
 
+        let frame_start = Instant::now();
         let app = &mut self.app;
         let mut out = self.ctx.run_ui(input, |ui| app.ui(ui));
         gpu.egui_winit.handle_platform_output(&window, std::mem::take(&mut out.platform_output));
@@ -300,6 +304,13 @@ impl Runner {
         }
         window.pre_present_notify();
         gpu.gl.swap();
+        if !self.first_ui_shown {
+            self.first_ui_shown = true;
+            if self.timing {
+                let build = frame_start.elapsed().as_secs_f64() * 1000.0;
+                eprintln!("[timing] first UI frame {:.1} ms (built in {build:.1} ms)", self.ms());
+            }
+        }
 
         if !self.first_image_shown && self.app.has_image() {
             self.first_image_shown = true;

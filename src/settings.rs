@@ -13,6 +13,8 @@ pub struct Settings {
     pub slide_secs: f32,
     pub slide_loop: bool,
     pub slide_fullscreen: bool,
+    /// Confirm before moving the current file to the trash.
+    pub ask_before_delete: bool,
 }
 
 impl Default for Settings {
@@ -25,6 +27,7 @@ impl Default for Settings {
             slide_secs: 4.0,
             slide_loop: true,
             slide_fullscreen: true,
+            ask_before_delete: true,
         }
     }
 }
@@ -71,6 +74,7 @@ impl Settings {
                 }
                 "slide_loop" => self.slide_loop = b,
                 "slide_fullscreen" => self.slide_fullscreen = b,
+                "ask_before_delete" => self.ask_before_delete = b,
                 _ => {}
             }
         }
@@ -78,8 +82,15 @@ impl Settings {
 
     fn to_text(&self) -> String {
         format!(
-            "wheel_zoom={}\nwindow_fit={}\nfit_upscale={}\nshow_strip={}\nslide_secs={}\nslide_loop={}\nslide_fullscreen={}\n",
-            self.wheel_zoom, self.window_fit, self.fit_upscale, self.show_strip, self.slide_secs, self.slide_loop, self.slide_fullscreen
+            "wheel_zoom={}\nwindow_fit={}\nfit_upscale={}\nshow_strip={}\nslide_secs={}\nslide_loop={}\nslide_fullscreen={}\nask_before_delete={}\n",
+            self.wheel_zoom,
+            self.window_fit,
+            self.fit_upscale,
+            self.show_strip,
+            self.slide_secs,
+            self.slide_loop,
+            self.slide_fullscreen,
+            self.ask_before_delete
         )
     }
 
@@ -98,7 +109,7 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let s = Settings { wheel_zoom: true, window_fit: true, slide_secs: 2.5, slide_loop: false, ..Default::default() };
+        let s = Settings { wheel_zoom: true, window_fit: true, slide_secs: 2.5, slide_loop: false, ask_before_delete: false, ..Default::default() };
         let mut t = Settings::default();
         t.parse(&s.to_text());
         assert!(t == s);
