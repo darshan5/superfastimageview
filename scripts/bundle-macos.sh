@@ -33,7 +33,39 @@ codesign --force --deep --sign - "$APP"
 echo "Built $APP"
 
 if [[ "${1:-}" == "--dmg" ]]; then
+  # The usual drag-to-install layout: the app next to a link to /Applications.
+  STAGE=$(mktemp -d)/SuperFastImageView
+  mkdir -p "$STAGE"
+  cp -R "$APP" "$STAGE/"
+  ln -s /Applications "$STAGE/Applications"
   rm -f dist/SuperFastImageView.dmg
-  hdiutil create -volname SuperFastImageView -srcfolder "$APP" -ov -format UDZO dist/SuperFastImageView.dmg
+  RW=$(mktemp -d)/rw.dmg
+  hdiutil create -volname SuperFastImageView -srcfolder "$STAGE" -ov -format UDRW "$RW"
+
+  # Big icons, app on the left, Applications on the right. Needs Finder, so
+  # it is best effort: without it the image still works, just unarranged.
+  MNT=$(hdiutil attach "$RW" -readwrite -noverify -noautoopen | grep -o '/Volumes/.*$')
+  osascript <<EOS || echo "warning: could not arrange the DMG window"
+tell application "Finder"
+  tell disk "$(basename "$MNT")"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {200, 120, 740, 460}
+    set opts to the icon view options of container window
+    set arrangement of opts to not arranged
+    set icon size of opts to 128
+    set position of item "SuperFastImageView.app" of container window to {140, 150}
+    set position of item "Applications" of container window to {400, 150}
+    update without registering applications
+    delay 1
+    close
+  end tell
+end tell
+EOS
+  sync
+  hdiutil detach "$MNT" -quiet || hdiutil detach "$MNT" -force
+  hdiutil convert "$RW" -format UDZO -o dist/SuperFastImageView.dmg
   echo "Built dist/SuperFastImageView.dmg"
 fi
