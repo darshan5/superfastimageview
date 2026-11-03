@@ -1028,7 +1028,7 @@ impl App {
         if pressed(Key::ArrowRight) || pressed(Key::Space) || pressed(Key::PageDown) {
             self.navigate(1);
         }
-        if pressed(Key::ArrowLeft) || pressed(Key::Backspace) || pressed(Key::PageUp) {
+        if pressed(Key::ArrowLeft) || (!cfg!(target_os = "macos") && pressed(Key::Backspace)) || pressed(Key::PageUp) {
             self.navigate(-1);
         }
         if pressed(Key::Home) {
@@ -1062,7 +1062,8 @@ impl App {
             let ppp = ctx.pixels_per_point();
             self.zoom_about(area, area.center(), if zoom_in { 1.25 } else { 0.8 }, ppp);
         }
-        if pressed(Key::Delete) {
+        // The key labelled "delete" on Mac keyboards sends Backspace.
+        if pressed(Key::Delete) || (cfg!(target_os = "macos") && pressed(Key::Backspace)) {
             self.request_delete();
         }
         if pressed(Key::Enter) || pressed(Key::F11) {
@@ -1405,7 +1406,7 @@ impl App {
                     self.strip_current();
                 }
                 ui.separator();
-                if ui.add_enabled(has_doc, egui::Button::new("Move to trash…").shortcut_text("Del")).clicked() {
+                if ui.add_enabled(has_doc, egui::Button::new("Move to trash…").shortcut_text(DELETE_KEY)).clicked() {
                     self.request_delete();
                 }
                 ui.checkbox(&mut self.settings.ask_before_delete, "Ask before moving to trash");
@@ -1624,6 +1625,14 @@ impl App {
                 }
                 if ui.button(icon(icons::REDO)).on_hover_text("Redo (Ctrl+Shift+Z)").clicked() {
                     self.redo();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(self.doc.as_ref().is_some_and(|d| d.path.is_some()), egui::Button::new(icon(icons::TRASH)))
+                    .on_hover_text(format!("Move to trash ({DELETE_KEY})"))
+                    .clicked()
+                {
+                    self.request_delete();
                 }
             });
             ui.separator();
@@ -2995,9 +3004,13 @@ impl App {
 // ---------------------------------------------------------------------------
 // helpers
 
+/// Backspace deletes on macOS, where it is the key labelled "delete".
+const DELETE_KEY: &str = if cfg!(target_os = "macos") { "Delete" } else { "Del" };
+const PREV_KEYS: &str = if cfg!(target_os = "macos") { "← / PgUp" } else { "← / Backspace / PgUp" };
+
 const HELP: &[(&str, &str)] = &[
     ("→ / Space / PgDn", "Next image"),
-    ("← / Backspace / PgUp", "Previous image"),
+    (PREV_KEYS, "Previous image"),
     ("Home / End", "First / last image"),
     ("Wheel", "Next / previous image (or zoom: View menu)"),
     ("Ctrl+wheel, + / −", "Zoom"),
@@ -3024,7 +3037,7 @@ const HELP: &[(&str, &str)] = &[
     ("Ctrl+E", "Remove metadata (EXIF/GPS), overwriting the file"),
     ("B", "Batch conversion"),
     ("I", "Image info"),
-    ("Del", "Move file to trash"),
+    (DELETE_KEY, "Move file to trash"),
     ("Esc", "Close dialog / clear selection / leave full screen / quit"),
 ];
 

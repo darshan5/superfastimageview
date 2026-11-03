@@ -148,7 +148,7 @@ On macOS use Cmd instead of Ctrl. Press `F1` in the app for the full list.
 
 | Key | Action |
 |-----|--------|
-| → / Space / PgDn, ← / Backspace / PgUp | Next / previous image |
+| → / Space / PgDn, ← / Backspace / PgUp | Next / previous image (Backspace is Windows only) |
 | Home / End | First / last image |
 | Wheel | Next / previous image (or zoom, see View menu) |
 | Ctrl+wheel, `+` / `-` | Zoom |
@@ -171,7 +171,7 @@ On macOS use Cmd instead of Ctrl. Press `F1` in the app for the full list.
 | Ctrl+Enter | Apply text (Text tool) |
 | `B` | Batch conversion |
 | `I` | Image info |
-| Del | Move to trash (asks first; can be turned off in the File menu) |
+| Del (delete on macOS) | Move to trash (asks first; can be turned off in the File menu) |
 | Esc | Close dialog → clear selection → leave full screen → quit |
 
 ## Building

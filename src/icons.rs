@@ -41,6 +41,7 @@ pub const ELLIPSE: char = '\u{e18a}';
 pub const FILL: char = '\u{e392}';
 pub const TEXT: char = '\u{e48a}';
 pub const SWAP: char = '\u{e0a0}';
+pub const TRASH: char = '\u{e4a6}';
 
 /// Registers the icon font. Cheap: egui parses it when the font atlas is
 /// first built, which happens after the first image is already on screen.
