@@ -18,6 +18,7 @@ mod raw;
 mod settings;
 mod text;
 mod thumbs;
+mod update;
 #[cfg(windows)]
 mod preview;
 

@@ -15,6 +15,13 @@ pub struct Settings {
     pub slide_fullscreen: bool,
     /// Confirm before moving the current file to the trash.
     pub ask_before_delete: bool,
+    /// Look for a new release once a month, after the first image is shown.
+    pub check_updates: bool,
+    /// When the last update check succeeded (seconds since 1970).
+    pub last_update_check: i64,
+    /// The newest release that check found, so "Update available" survives
+    /// restarts without asking GitHub again.
+    pub latest_version: String,
 }
 
 impl Default for Settings {
@@ -28,6 +35,9 @@ impl Default for Settings {
             slide_loop: true,
             slide_fullscreen: true,
             ask_before_delete: true,
+            check_updates: true,
+            last_update_check: 0,
+            latest_version: String::new(),
         }
     }
 }
@@ -75,6 +85,9 @@ impl Settings {
                 "slide_loop" => self.slide_loop = b,
                 "slide_fullscreen" => self.slide_fullscreen = b,
                 "ask_before_delete" => self.ask_before_delete = b,
+                "check_updates" => self.check_updates = b,
+                "last_update_check" => self.last_update_check = v.parse().unwrap_or(0),
+                "latest_version" => self.latest_version = v.to_string(),
                 _ => {}
             }
         }
@@ -82,7 +95,7 @@ impl Settings {
 
     fn to_text(&self) -> String {
         format!(
-            "wheel_zoom={}\nwindow_fit={}\nfit_upscale={}\nshow_strip={}\nslide_secs={}\nslide_loop={}\nslide_fullscreen={}\nask_before_delete={}\n",
+            "wheel_zoom={}\nwindow_fit={}\nfit_upscale={}\nshow_strip={}\nslide_secs={}\nslide_loop={}\nslide_fullscreen={}\nask_before_delete={}\ncheck_updates={}\nlast_update_check={}\nlatest_version={}\n",
             self.wheel_zoom,
             self.window_fit,
             self.fit_upscale,
@@ -90,7 +103,10 @@ impl Settings {
             self.slide_secs,
             self.slide_loop,
             self.slide_fullscreen,
-            self.ask_before_delete
+            self.ask_before_delete,
+            self.check_updates,
+            self.last_update_check,
+            self.latest_version
         )
     }
 
@@ -109,7 +125,7 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let s = Settings { wheel_zoom: true, window_fit: true, slide_secs: 2.5, slide_loop: false, ask_before_delete: false, ..Default::default() };
+        let s = Settings { wheel_zoom: true, window_fit: true, slide_secs: 2.5, slide_loop: false, ask_before_delete: false, check_updates: false, last_update_check: 1_790_000_000, latest_version: "0.3.0".into(), ..Default::default() };
         let mut t = Settings::default();
         t.parse(&s.to_text());
         assert!(t == s);

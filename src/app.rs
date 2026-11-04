@@ -23,7 +23,7 @@ use crate::paint::{self, Dirty};
 use crate::settings::Settings;
 use crate::thumbs::Thumbs;
 use crate::icons::{self, icon};
-use crate::{metadata, text};
+use crate::{metadata, text, update};
 
 const APP_NAME: &str = "SuperFastImageView";
 const BG: Color32 = Color32::from_gray(24);
@@ -405,6 +405,8 @@ pub struct App {
     batch: BatchDialog,
     show_help: bool,
     show_info: bool,
+    show_settings: bool,
+    update: update::UpdateState,
     confirm_delete: bool,
     /// "Don't ask again" in the delete confirmation, applied on confirm.
     delete_dont_ask: bool,
@@ -467,6 +469,8 @@ impl App {
             batch: BatchDialog::default(),
             show_help: false,
             show_info: false,
+            show_settings: false,
+            update: update::UpdateState::default(),
             confirm_delete: false,
             delete_dont_ask: false,
             pending: None,
@@ -587,6 +591,7 @@ impl App {
     }
 
     fn poll_background(&mut self, ctx: &egui::Context) {
+        self.poll_updates(ctx);
         for msg in self.loader.poll() {
             if self.target.as_ref() != Some(&msg.path) {
                 continue;
@@ -622,6 +627,25 @@ impl App {
                 }
                 ctx.request_repaint();
             }
+    }
+
+    /// Starts the monthly update check once the first image is on screen
+    /// (so it never competes with startup), and records results.
+    fn poll_updates(&mut self, ctx: &egui::Context) {
+        let settled = self.folder_rx.is_none() && (self.target.is_none() || self.doc.is_some() || self.load_error.is_some());
+        if settled && self.settings.check_updates {
+            self.update.start_if_due(ctx, self.settings.last_update_check);
+        }
+        if let Some(Ok(v)) = self.update.poll() {
+            self.settings.latest_version = v;
+            self.settings.last_update_check = update::now_secs();
+        }
+    }
+
+    /// A newer release than this build, if a check has found one.
+    fn update_available(&self) -> Option<String> {
+        let v = &self.settings.latest_version;
+        update::is_newer(v, update::current_version()).then(|| v.clone())
     }
 
     // -- file operations ----------------------------------------------------
@@ -977,6 +1001,8 @@ impl App {
             self.modify("Invert colors", edit::invert);
         } else if k(cmd, Key::E) {
             self.strip_current();
+        } else if k(cmd, Key::Comma) {
+            self.show_settings = !self.show_settings;
         } else if k(cmd, Key::O) {
             self.open_dialog();
         } else if k(cmd, Key::S) {
@@ -1114,7 +1140,7 @@ impl App {
         if self.resize_dlg.take().is_some() || self.new_dlg.take().is_some() {
             return true;
         }
-        for open in [&mut self.show_help, &mut self.show_info] {
+        for open in [&mut self.show_settings, &mut self.show_help, &mut self.show_info] {
             if *open {
                 *open = false;
                 return true;
@@ -1362,6 +1388,12 @@ impl App {
         egui::MenuBar::new().ui(ui, |ui| {
             let has_doc = self.doc.is_some();
             ui.menu_button("File", |ui| {
+                if let Some(v) = self.update_available() {
+                    if ui.button(format!("Update available (v{v})…")).on_hover_text("Opens the download page").clicked() {
+                        update::open_page(&update::release_page(&v));
+                    }
+                    ui.separator();
+                }
                 if ui.add(egui::Button::new("Open…").shortcut_text(sc("Ctrl+O"))).clicked() {
                     self.open_dialog();
                 }
@@ -1409,7 +1441,10 @@ impl App {
                 if ui.add_enabled(has_doc, egui::Button::new("Move to trash…").shortcut_text(DELETE_KEY)).clicked() {
                     self.request_delete();
                 }
-                ui.checkbox(&mut self.settings.ask_before_delete, "Ask before moving to trash");
+                ui.separator();
+                if ui.add(egui::Button::new("Settings…").shortcut_text(sc("Ctrl+,"))).clicked() {
+                    self.show_settings = true;
+                }
                 if ui.add(egui::Button::new("Exit").shortcut_text("Esc")).clicked() {
                     ui.ctx().send_viewport_cmd(ViewportCommand::Close);
                 }
@@ -1499,19 +1534,6 @@ impl App {
                 if ui.add(egui::Button::new("Actual size (100%)").shortcut_text("1")).clicked() {
                     self.set_zoom(1.0);
                 }
-                ui.checkbox(&mut self.settings.fit_upscale, "Fit enlarges small images");
-                ui.separator();
-                ui.label("Window size");
-                if ui.radio_value(&mut self.settings.window_fit, false, "Keep fixed").clicked() {
-                    self.window_fitted = None;
-                }
-                if ui.radio_value(&mut self.settings.window_fit, true, "Fit window to image").clicked() {
-                    self.window_fitted = None;
-                }
-                ui.label("Mouse wheel");
-                ui.radio_value(&mut self.settings.wheel_zoom, false, "Next / previous image");
-                ui.radio_value(&mut self.settings.wheel_zoom, true, "Zoom");
-                ui.weak("Ctrl+wheel always zooms.");
                 let mut px = self.canvas.pixelated;
                 if ui.checkbox(&mut px, "Pixelated zoom (nearest neighbour)").changed() {
                     self.canvas.pixelated = px;
@@ -1526,20 +1548,14 @@ impl App {
                 if ui.checkbox(&mut grid, "Grid view (G)").changed() {
                     self.toggle_grid();
                 }
-                ui.menu_button("Slideshow", |ui| {
-                    let ctx = ui.ctx().clone();
-                    if self.slide.is_some() {
-                        if ui.add(egui::Button::new("Stop slideshow").shortcut_text("F5 / Esc")).clicked() {
-                            self.stop_slideshow(&ctx);
-                        }
-                    } else if ui.add(egui::Button::new("Start slideshow").shortcut_text("F5")).clicked() {
-                        self.start_slideshow(&ctx);
+                let ctx = ui.ctx().clone();
+                if self.slide.is_some() {
+                    if ui.add(egui::Button::new("Stop slideshow").shortcut_text("F5 / Esc")).clicked() {
+                        self.stop_slideshow(&ctx);
                     }
-                    ui.add(egui::Slider::new(&mut self.settings.slide_secs, 0.5..=60.0).logarithmic(true).suffix(" s").text("Delay"));
-                    ui.checkbox(&mut self.settings.slide_loop, "Loop");
-                    ui.checkbox(&mut self.settings.slide_fullscreen, "Full screen");
-                    ui.weak("Space pauses, arrows step.");
-                });
+                } else if ui.add(egui::Button::new("Slideshow").shortcut_text("F5")).clicked() {
+                    self.start_slideshow(&ctx);
+                }
                 if ui.add(egui::Button::new("Image info").shortcut_text("I")).clicked() {
                     self.show_info = !self.show_info;
                 }
@@ -1551,6 +1567,10 @@ impl App {
             ui.menu_button("Help", |ui| {
                 if ui.add(egui::Button::new("Keyboard shortcuts").shortcut_text("F1")).clicked() {
                     self.show_help = true;
+                }
+                if ui.button("Check for updates…").clicked() {
+                    self.show_settings = true;
+                    self.update.start(ui.ctx(), true);
                 }
             });
         });
@@ -2369,6 +2389,65 @@ impl App {
         }
     }
 
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        let mut open = true;
+        egui::Window::new("Settings").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+            ui.strong("Viewing");
+            ui.label("Mouse wheel");
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.settings.wheel_zoom, false, "Next / previous image");
+                ui.radio_value(&mut self.settings.wheel_zoom, true, "Zoom");
+            });
+            ui.weak(sc("Ctrl+wheel always zooms."));
+            ui.label("Window size");
+            ui.horizontal(|ui| {
+                if ui.radio_value(&mut self.settings.window_fit, false, "Keep fixed").clicked()
+                    | ui.radio_value(&mut self.settings.window_fit, true, "Fit window to image").clicked()
+                {
+                    self.window_fitted = None;
+                }
+            });
+            ui.checkbox(&mut self.settings.fit_upscale, "Fit enlarges small images");
+
+            ui.separator();
+            ui.strong("Slideshow");
+            ui.add(egui::Slider::new(&mut self.settings.slide_secs, 0.5..=60.0).logarithmic(true).suffix(" s").text("Delay"));
+            ui.checkbox(&mut self.settings.slide_loop, "Loop");
+            ui.checkbox(&mut self.settings.slide_fullscreen, "Full screen");
+
+            ui.separator();
+            ui.strong("Files");
+            ui.checkbox(&mut self.settings.ask_before_delete, "Ask before moving to trash");
+
+            ui.separator();
+            ui.strong("About");
+            ui.label(format!("{APP_NAME} {}", update::current_version()));
+            ui.checkbox(&mut self.settings.check_updates, "Check for updates automatically (once a month)");
+            ui.horizontal(|ui| {
+                let checking = self.update.job.is_some();
+                if ui.add_enabled(!checking, egui::Button::new("Check now")).clicked() {
+                    self.update.start(ctx, true);
+                }
+                if checking {
+                    ui.spinner();
+                }
+                if let Some(status) = &self.update.status {
+                    ui.weak(status);
+                }
+            });
+            if let Some(v) = self.update_available()
+                && ui.link(format!("Download version {v}")).clicked()
+            {
+                update::open_page(&update::release_page(&v));
+            }
+            ui.weak("A check asks GitHub which release is the latest, sending only the app's name and version.");
+            if let Some(dir) = crate::settings::dir() {
+                ui.weak(format!("Settings are saved in {}", dir.display()));
+            }
+        });
+        self.show_settings = open;
+    }
+
     fn dialogs(&mut self, ctx: &egui::Context) {
         // Resize.
         if let Some(dlg) = &mut self.resize_dlg {
@@ -2492,6 +2571,10 @@ impl App {
                 }
             });
             self.show_info = open;
+        }
+
+        if self.show_settings {
+            self.settings_window(ctx);
         }
 
         if self.show_help {
@@ -3012,7 +3095,7 @@ const HELP: &[(&str, &str)] = &[
     ("→ / Space / PgDn", "Next image"),
     (PREV_KEYS, "Previous image"),
     ("Home / End", "First / last image"),
-    ("Wheel", "Next / previous image (or zoom: View menu)"),
+    ("Wheel", "Next / previous image (or zoom: Settings)"),
     ("Ctrl+wheel, + / −", "Zoom"),
     ("0 or F / 1", "Fit / actual size"),
     ("Drag, middle-drag, Space+drag", "Scroll a zoomed-in image"),
@@ -3037,6 +3120,7 @@ const HELP: &[(&str, &str)] = &[
     ("Ctrl+E", "Remove metadata (EXIF/GPS), overwriting the file"),
     ("B", "Batch conversion"),
     ("I", "Image info"),
+    ("Ctrl+,", "Settings, version and update check"),
     (DELETE_KEY, "Move file to trash"),
     ("Esc", "Close dialog / clear selection / leave full screen / quit"),
 ];

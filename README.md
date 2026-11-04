@@ -171,7 +171,8 @@ On macOS use Cmd instead of Ctrl. Press `F1` in the app for the full list.
 | Ctrl+Enter | Apply text (Text tool) |
 | `B` | Batch conversion |
 | `I` | Image info |
-| Del (delete on macOS) | Move to trash (asks first; can be turned off in the File menu) |
+| Del (delete on macOS) | Move to trash (asks first; can be turned off in Settings) |
+| Ctrl+, | Settings, version and update check |
 | Esc | Close dialog → clear selection → leave full screen → quit |
 
 ## Building
@@ -235,6 +236,7 @@ Other tools:
 | `src/thumbs.rs` | Background thumbnail decoding and texture cache |
 | `src/text.rs` | Font list and text rendering for the Text tool |
 | `src/settings.rs` | Preferences saved between runs |
+| `src/update.rs` | Monthly / manual update check against GitHub releases (via the system curl) |
 | `src/canvas.rs` | Tiled GPU textures, partial updates |
 | `src/app.rs` | UI: viewer, menus, tools, dialogs, shortcuts |
 | `src/edit.rs` | Whole-image operations |
