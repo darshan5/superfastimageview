@@ -22,6 +22,10 @@ pub struct Settings {
     /// The newest release that check found, so "Update available" survives
     /// restarts without asking GitHub again.
     pub latest_version: String,
+    /// The window's last normal (not maximized or full screen) outer
+    /// position and inner size, in physical pixels: x, y, width, height.
+    pub window_rect: Option<[i32; 4]>,
+    pub window_maximized: bool,
 }
 
 impl Default for Settings {
@@ -38,6 +42,8 @@ impl Default for Settings {
             check_updates: true,
             last_update_check: 0,
             latest_version: String::new(),
+            window_rect: None,
+            window_maximized: false,
         }
     }
 }
@@ -88,6 +94,11 @@ impl Settings {
                 "check_updates" => self.check_updates = b,
                 "last_update_check" => self.last_update_check = v.parse().unwrap_or(0),
                 "latest_version" => self.latest_version = v.to_string(),
+                "window_rect" => {
+                    let n: Vec<i32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    self.window_rect = <[i32; 4]>::try_from(n).ok().filter(|r| r[2] > 0 && r[3] > 0);
+                }
+                "window_maximized" => self.window_maximized = b,
                 _ => {}
             }
         }
@@ -95,7 +106,7 @@ impl Settings {
 
     fn to_text(&self) -> String {
         format!(
-            "wheel_zoom={}\nwindow_fit={}\nfit_upscale={}\nshow_strip={}\nslide_secs={}\nslide_loop={}\nslide_fullscreen={}\nask_before_delete={}\ncheck_updates={}\nlast_update_check={}\nlatest_version={}\n",
+            "wheel_zoom={}\nwindow_fit={}\nfit_upscale={}\nshow_strip={}\nslide_secs={}\nslide_loop={}\nslide_fullscreen={}\nask_before_delete={}\ncheck_updates={}\nlast_update_check={}\nlatest_version={}\nwindow_maximized={}\n{}",
             self.wheel_zoom,
             self.window_fit,
             self.fit_upscale,
@@ -106,7 +117,9 @@ impl Settings {
             self.ask_before_delete,
             self.check_updates,
             self.last_update_check,
-            self.latest_version
+            self.latest_version,
+            self.window_maximized,
+            self.window_rect.map_or(String::new(), |[x, y, w, h]| format!("window_rect={x},{y},{w},{h}\n"))
         )
     }
 
@@ -125,7 +138,7 @@ mod tests {
 
     #[test]
     fn round_trips() {
-        let s = Settings { wheel_zoom: true, window_fit: true, slide_secs: 2.5, slide_loop: false, ask_before_delete: false, check_updates: false, last_update_check: 1_790_000_000, latest_version: "0.3.0".into(), ..Default::default() };
+        let s = Settings { wheel_zoom: true, window_fit: true, slide_secs: 2.5, slide_loop: false, ask_before_delete: false, check_updates: false, last_update_check: 1_790_000_000, latest_version: "0.3.0".into(), window_rect: Some([-1920, 40, 1280, 860]), window_maximized: true, ..Default::default() };
         let mut t = Settings::default();
         t.parse(&s.to_text());
         assert!(t == s);

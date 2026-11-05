@@ -67,6 +67,12 @@ struct Runner {
     gpu: Option<Gpu>,
     viewport_info: egui::ViewportInfo,
     close_pending: bool,
+    /// The window's last normal outer position and inner size, saved on exit.
+    normal_rect: Option<[i32; 4]>,
+    maximized: bool,
+    /// Moved/resized since the last look; checked once events settle,
+    /// because Windows reports a maximize's move before its maximized state.
+    geometry_changed: bool,
     next_repaint: Option<Instant>,
     first_image_shown: bool,
     first_ui_shown: bool,
@@ -166,6 +172,9 @@ fn main() {
         gpu: None,
         viewport_info: egui::ViewportInfo::default(),
         close_pending: false,
+        normal_rect: None,
+        maximized: false,
+        geometry_changed: false,
         next_repaint: None,
         first_image_shown: false,
         first_ui_shown: false,
@@ -192,7 +201,14 @@ impl Runner {
             .with_min_inner_size(winit::dpi::LogicalSize::new(480.0, 320.0))
             .with_theme(Some(winit::window::Theme::Dark))
             .with_window_icon(winit::window::Icon::from_rgba(icon::icon_rgba(64), 64, 64).ok());
-        if let Some(m) = el.primary_monitor() {
+        let (saved, maximized) = self.app.saved_window();
+        if let Some([x, y, w, h]) = saved.filter(|&r| on_screen(el, r)) {
+            // Where it was last time.
+            attrs = attrs
+                .with_inner_size(winit::dpi::PhysicalSize::new(w as u32, h as u32))
+                .with_position(winit::dpi::PhysicalPosition::new(x, y))
+                .with_maximized(maximized);
+        } else if let Some(m) = el.primary_monitor() {
             let s = m.scale_factor();
             let ms = m.size();
             let w = (size.width * s) as i32;
@@ -206,7 +222,22 @@ impl Runner {
             eprintln!("[timing] window created {:.1} ms", self.ms());
         }
         self.window = Some(window);
+        self.track_window();
         self.paint_preview(true);
+    }
+
+    /// Notes the window's normal position and size (not while maximized,
+    /// full screen or minimized), to restore them next time.
+    fn track_window(&mut self) {
+        let Some(window) = &self.window else { return };
+        self.maximized = window.is_maximized();
+        if self.maximized || window.fullscreen().is_some() || window.is_minimized() == Some(true) {
+            return;
+        }
+        let (Ok(pos), size) = (window.outer_position(), window.inner_size()) else { return };
+        if size.width > 0 && size.height > 0 {
+            self.normal_rect = Some([pos.x, pos.y, size.width as i32, size.height as i32]);
+        }
     }
 
     fn raw_window(&self) -> RawWindowHandle {
@@ -368,11 +399,22 @@ impl Runner {
     }
 
     fn exit(&mut self, el: &ActiveEventLoop) {
+        self.app.save_window(self.normal_rect, self.maximized);
         if let Some(gpu) = &mut self.gpu {
             gpu.painter.destroy();
         }
         el.exit();
     }
+}
+
+/// Is enough of a saved window (`[x, y, w, h]`) on some monitor to grab its
+/// title bar? Monitors get unplugged and rearranged between runs.
+fn on_screen(el: &ActiveEventLoop, [x, y, w, _]: [i32; 4]) -> bool {
+    el.available_monitors().any(|m| {
+        let (p, s) = (m.position(), m.size());
+        let overlap = (x + w).min(p.x + s.width as i32) - x.max(p.x);
+        overlap >= 100 && y >= p.y - 8 && y < p.y + s.height as i32 - 40
+    })
 }
 
 /// Reads back the frame being presented and writes it as a PNG.
@@ -478,13 +520,15 @@ impl ApplicationHandler<UserEvent> for Runner {
         match event {
             WindowEvent::CloseRequested => {
                 if self.gpu.is_none() {
-                    el.exit();
+                    self.exit(el);
                 } else {
                     self.close_pending = true;
                     window.request_redraw();
                 }
             }
+            WindowEvent::Moved(_) => self.geometry_changed = true,
             WindowEvent::Resized(size) => {
+                self.geometry_changed = true;
                 if let Some(gpu) = &self.gpu {
                     gpu.gl.resize(size.width, size.height);
                     window.request_redraw();
@@ -498,6 +542,9 @@ impl ApplicationHandler<UserEvent> for Runner {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if std::mem::take(&mut self.geometry_changed) {
+            self.track_window();
+        }
         match self.next_repaint {
             Some(t) if t <= Instant::now() => {
                 self.next_repaint = None;

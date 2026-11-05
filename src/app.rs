@@ -416,6 +416,23 @@ pub struct App {
 }
 
 impl App {
+    /// Where the window was when the app last closed: (rect, maximized).
+    pub fn saved_window(&self) -> (Option<[i32; 4]>, bool) {
+        (self.settings.window_rect, self.settings.window_maximized)
+    }
+
+    /// Remembers the window's place for next time (called on exit).
+    pub fn save_window(&mut self, rect: Option<[i32; 4]>, maximized: bool) {
+        if rect.is_some() {
+            self.settings.window_rect = rect;
+        }
+        self.settings.window_maximized = maximized;
+        if self.settings != self.saved_settings {
+            self.settings.save();
+            self.saved_settings = self.settings.clone();
+        }
+    }
+
     pub fn new(ctx: &egui::Context, loader: Loader, initial: Option<PathBuf>) -> Self {
         let settings = Settings::load();
         let mut app = Self {
