@@ -17,6 +17,9 @@ Get the latest build from
   without admin rights (or for all users), adds Start menu and "Open with"
   entries for every supported image type, and leaves your default apps alone.
 - **Windows portable** (`…-windows-x64.exe`): a single exe, nothing to install.
+- **Windows command line** (`superfastimageview-cli-…-windows-x64.exe`): the
+  [command-line tool](#command-line) on its own. The installer includes it and
+  can add it to `PATH`.
 - **macOS, Apple Silicon** (`…-macos-arm64.dmg`).
 
 None of these are code-signed yet, so Windows SmartScreen will warn on first
@@ -141,6 +144,40 @@ list in the edit panel)
   file contains.
 - Saving or converting never writes metadata, so converted files carry no
   EXIF/GPS either.
+
+## Command line
+
+Headless commands for scripts and AI agents. On **Windows** use
+`superfastimageview-cli`, a console program installed next to the app (the
+installer can add it to `PATH`). On **macOS** the app itself takes the commands:
+`SuperFastImageView.app/Contents/MacOS/SuperFastImageView <command> ...`. Run
+`help` for every option.
+
+```sh
+superfastimageview-cli info --json photos/                       # size, format, alpha, frames, orientation, metadata
+superfastimageview-cli convert "*.png" -f webp -q 80 -o web/     # convert (with optional --crop/--rotate/--flip/--max/--grayscale)
+superfastimageview-cli resize big.jpg --max 1568 -o small.jpg    # --max --fit --width --height --size --percent
+superfastimageview-cli rotate auto -r photos --in-place          # cw|ccw|180|auto; lossless for JPEG
+superfastimageview-cli flip h shot.png -o flipped/
+superfastimageview-cli strip --in-place "*.jpg"                  # lossless metadata removal
+superfastimageview-cli compress hero.jpg --target-size 200KB -o hero-small.jpg
+```
+
+Wildcards and folders are expanded by the program, so they work in any shell
+(`-r` recurses). Inputs run in parallel, and results print in input order;
+`--json` prints one object per input. Nothing is overwritten without
+`--overwrite` or `--in-place`, and `--dry-run` shows what would be written.
+Exit status: 0 success, 1 some inputs failed, 2 bad usage.
+
+Starting the GUI is unaffected: `main` checks the first argument before
+anything else.
+
+**Why a separate exe on Windows:** `SuperFastImageView.exe` is a GUI program,
+so it opens without a console window. It accepts the same commands, but
+PowerShell doesn't wait for GUI programs: the output arrives late and
+`$LASTEXITCODE` stays empty unless you pipe it (`| Out-String`).
+`superfastimageview-cli.exe` is a normal console program and works as typed
+in PowerShell, cmd and bash.
 
 ## Keyboard shortcuts
 

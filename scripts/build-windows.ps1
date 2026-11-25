@@ -1,8 +1,9 @@
-# Builds the optimized Windows executable into dist\.
+# Builds the optimized Windows executables (GUI and console CLI) into dist\.
 #   powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
 $ErrorActionPreference = "Stop"
 Set-Location (Join-Path $PSScriptRoot "..")
 cargo build --release
 New-Item -ItemType Directory -Force dist | Out-Null
 Copy-Item target\release\superfastimageview.exe dist\SuperFastImageView.exe -Force
-Write-Host "Built dist\SuperFastImageView.exe"
+Copy-Item target\release\superfastimageview-cli.exe dist\superfastimageview-cli.exe -Force
+Write-Host "Built dist\SuperFastImageView.exe and dist\superfastimageview-cli.exe"

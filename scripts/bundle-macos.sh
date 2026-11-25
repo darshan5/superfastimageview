@@ -10,7 +10,7 @@ APP=dist/SuperFastImageView.app
 VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
 
 rustup target add "$TARGET" >/dev/null
-cargo build --release --target "$TARGET"
+cargo build --release --target "$TARGET" --bin superfastimageview
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

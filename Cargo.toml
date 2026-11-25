@@ -40,7 +40,7 @@ opt-level = 3
 [target."cfg(windows)".dependencies]
 mimalloc = "0.1.52"
 windows = { version = "0.62", features = ["Win32_Graphics_Imaging", "Win32_System_Com", "Win32_Foundation"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader", "Win32_System_Console"] }
 
 [target."cfg(windows)".build-dependencies]
 winresource = "0.1.34"

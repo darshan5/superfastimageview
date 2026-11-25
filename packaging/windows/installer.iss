@@ -2,7 +2,8 @@
 ;   iscc /DAppVersion=0.2.0 /DExeSource=..\..\target\release\superfastimageview.exe packaging\windows\installer.iss
 ; Installs per user by default (no admin prompt); the first page offers an
 ; all-users install instead. Adds SuperFastImageView to "Open with" for every
-; supported image type without taking over the current default app.
+; supported image type without taking over the current default app. Also
+; installs the console command-line tool and (optionally) puts it on PATH.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -10,8 +11,12 @@
 #ifndef ExeSource
   #define ExeSource "..\..\target\release\superfastimageview.exe"
 #endif
+#ifndef CliSource
+  #define CliSource "..\..\target\release\superfastimageview-cli.exe"
+#endif
 #define AppName "SuperFastImageView"
 #define ExeName "SuperFastImageView.exe"
+#define CliName "superfastimageview-cli.exe"
 #define ProgId "SuperFastImageView.Image"
 
 [Setup]
@@ -37,12 +42,15 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 ChangesAssociations=yes
+ChangesEnvironment=yes
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "addtopath"; Description: "Add the command-line tool (superfastimageview-cli) to PATH"; GroupDescription: "Command line:"
 
 [Files]
 Source: "{#ExeSource}"; DestDir: "{app}"; DestName: "{#ExeName}"; Flags: ignoreversion
+Source: "{#CliSource}"; DestDir: "{app}"; DestName: "{#CliName}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"
 Source: "..\..\assets\icons-LICENSE.txt"; DestDir: "{app}"
 
@@ -173,3 +181,55 @@ Root: HKA; Subkey: "Software\Classes\Applications\{#ExeName}\SupportedTypes"; Va
 
 [Run]
 Filename: "{app}\{#ExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// Adds {app} to the user's PATH (all users' for an all-users install), and
+// removes it again on uninstall.
+
+function EnvRoot: Integer;
+begin
+  if IsAdminInstallMode then Result := HKEY_LOCAL_MACHINE else Result := HKEY_CURRENT_USER;
+end;
+
+function EnvKey: String;
+begin
+  if IsAdminInstallMode then
+    Result := 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+  else
+    Result := 'Environment';
+end;
+
+procedure AddToPath(Dir: String);
+var
+  Paths: String;
+begin
+  if not RegQueryStringValue(EnvRoot, EnvKey, 'Path', Paths) then Paths := '';
+  if Pos(';' + Uppercase(Dir) + ';', ';' + Uppercase(Paths) + ';') > 0 then Exit;
+  if (Paths <> '') and (Paths[Length(Paths)] <> ';') then Paths := Paths + ';';
+  RegWriteExpandStringValue(EnvRoot, EnvKey, 'Path', Paths + Dir);
+end;
+
+procedure RemoveFromPath(Dir: String);
+var
+  Paths: String;
+  P: Integer;
+begin
+  if not RegQueryStringValue(EnvRoot, EnvKey, 'Path', Paths) then Exit;
+  Paths := ';' + Paths + ';';
+  P := Pos(';' + Uppercase(Dir) + ';', Uppercase(Paths));
+  if P = 0 then Exit;
+  Delete(Paths, P, Length(Dir) + 1);
+  RegWriteExpandStringValue(EnvRoot, EnvKey, 'Path', Copy(Paths, 2, Length(Paths) - 2));
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('addtopath') then
+    AddToPath(ExpandConstant('{app}'));
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RemoveFromPath(ExpandConstant('{app}'));
+end;

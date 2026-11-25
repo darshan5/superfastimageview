@@ -104,6 +104,12 @@ pub fn transform(jpeg: &[u8], op: Op) -> Result<(Vec<u8>, bool), String> {
     apply(jpeg, op_matrix(op))
 }
 
+/// Losslessly applies the EXIF orientation to the stored pixels and resets
+/// the tag, so viewers that ignore EXIF show the image upright too.
+pub fn auto_orient(jpeg: &[u8]) -> Result<(Vec<u8>, bool), String> {
+    apply(jpeg, I)
+}
+
 /// The EXIF orientation of a JPEG (1 = normal).
 pub fn orientation(jpeg: &[u8]) -> u16 {
     find_orientation(jpeg).map_or(1, |o| o.1)

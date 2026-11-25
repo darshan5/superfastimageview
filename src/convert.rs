@@ -150,6 +150,13 @@ pub fn save(img: &RgbaImage, path: &Path, fmt: OutFormat, opts: &SaveOptions) ->
     }
 }
 
+/// Encodes `img` into memory.
+pub fn encode_vec(img: &RgbaImage, fmt: OutFormat, opts: &SaveOptions) -> Result<Vec<u8>, String> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    encode(img, &mut buf, fmt, opts).map_err(|e| e.to_string())?;
+    Ok(buf.into_inner())
+}
+
 fn encode<W: Write + std::io::Seek>(
     img: &RgbaImage,
     w: &mut W,

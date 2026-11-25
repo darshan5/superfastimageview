@@ -25,6 +25,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/superfastimageview.exe "dist/SuperFastImageView-$GITHUB_REF_NAME-windows-x64.exe"
+          cp target/release/superfastimageview-cli.exe "dist/superfastimageview-cli-$GITHUB_REF_NAME-windows-x64.exe"
       - name: Build installer
         shell: pwsh
         run: |

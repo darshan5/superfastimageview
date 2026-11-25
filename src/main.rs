@@ -2,6 +2,7 @@
 
 mod app;
 mod canvas;
+mod cli;
 mod convert;
 mod edit;
 mod gl;
@@ -120,6 +121,10 @@ fn parse_shots(started: Instant) -> Vec<(PathBuf, Instant)> {
 
 fn main() {
     let started = Instant::now();
+    // Command-line mode (`superfastimageview convert ...`): no window at all.
+    if std::env::args_os().nth(1).is_some_and(|a| cli::is_command(&a)) {
+        std::process::exit(cli::main());
+    }
     let initial = std::env::args_os().nth(1).map(PathBuf::from);
     install_crash_log();
 
