@@ -297,6 +297,24 @@ Other tools:
 - Placed text can't be edited after it's applied (it becomes pixels; use
   undo).
 
+## Related projects
+
+Other fast native Rust apps by the same author, built the same way for AI agents: each has a
+console `-cli` program for Windows (in the installer and as its own `.exe`), headless commands
+with machine-readable output and exit codes, and the same notes for cmd and PowerShell.
+
+- **[OpenViSQL](https://github.com/darshan5/openvisql)**: a desktop SQL client for MySQL,
+  MariaDB, PostgreSQL and SQLite. `openvisql-cli query` runs SQL against a saved connection or
+  one given by flags, and prints the results as a table, records, CSV, TSV, JSON or Markdown.
+  It also runs saved queries with parameters (`--snippet "Order lines" --param order=1042`), and
+  `--read-only` makes it safe to use.
+- **[superfastnotepad](https://github.com/darshan5/superfastnotepad)**: a text and source-code
+  editor. `superfastnotepad-cli` has about 20 commands for working with text files from a
+  script: `search` (text or regex across files, JSON output), `tail --follow --until <regex>`
+  for logs, `lines` with line ranges, `append`/`write`, `replace` with a `--dry-run` diff,
+  encoding and line-ending `convert`, `diff`, `format`/`minify`/`validate` for JSON, XML and
+  more, CSV ↔ JSON, `base64`, `hash`, `time` and `uuid`.
+
 ## License
 
 MIT. Toolbar icons are a subset of [Phosphor Icons](https://phosphoricons.com)
